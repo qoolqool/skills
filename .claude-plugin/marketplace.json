@@ -1,0 +1,16 @@
+{
+  "name": "distill-rag-bridge",
+  "description": "Marketplace for distill-rag-bridge — persists conversation insights across sessions with optional vector search",
+  "version": "1.0.0",
+  "owner": {
+    "name": "qoolqool",
+    "url": "https://github.com/qoolqool/skills"
+  },
+  "plugins": [
+    {
+      "name": "distill-rag-bridge",
+      "source": "./plugins/distill-rag-bridge",
+      "description": "Distill conversation insights into durable memory, with optional AgentDB vector search"
+    }
+  ]
+}
