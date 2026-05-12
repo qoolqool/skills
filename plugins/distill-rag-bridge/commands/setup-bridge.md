@@ -26,7 +26,7 @@ claude plugin install distill-rag-bridge@distill-rag-bridge 2>/dev/null || true
 
 - `session-distillation` skill installed
 - Ollama installed and running
-- `all-minilm:latest` model pulled (45 MB) — pulled automatically at container/VM start
+- `bge-small:latest` model pulled (34 MB) — pulled automatically at container/VM start
 
 ## Steps
 
@@ -37,21 +37,21 @@ The bridge requires an embedding model. Check that at least one is available bef
 ```bash
 # Check primary: embed-server daemon
 if test -S /tmp/embed-server.sock; then
-  echo "✔ embed-server daemon running (all-MiniLM-L6-v2, ~40ms)"
+  echo "✔ embed-server daemon running (BAAI/bge-small-en-v1.5, ~40ms)"
   EMBED_READY=true
 # Check fallback: Ollama model
 elif curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
-sys.exit(0 if any('all-minilm' in m for m in models) else 1)" 2>/dev/null; then
-  echo "✔ Ollama fallback available (all-minilm:latest, ~330ms)"
+sys.exit(0 if any('bge-small' in m for m in models) else 1)" 2>/dev/null; then
+  echo "✔ Ollama fallback available (bge-small:latest, ~330ms)"
   EMBED_READY=true
 else
   echo "✖ No embedding model detected!"
   echo ""
   echo "  Neither the embed-server daemon (/tmp/embed-server.sock)"
-  echo "  nor the Ollama fallback model (all-minilm:latest) is available."
+  echo "  nor the Ollama fallback model (bge-small:latest) is available."
   echo ""
   echo "  This is a container-built dependency. Check container startup:"
   echo "    docker compose logs tooling | grep -E 'embed|ollama|model'"

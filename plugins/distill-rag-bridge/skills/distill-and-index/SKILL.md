@@ -30,13 +30,13 @@ Conversation ──► Phase 1 (Distill) ──► memory/*.md + knowledgebase/*
                                     ──searchable via──► /search-kb
 ```
 
-Embedding uses `embed-server.py` daemon (sentence-transformers, 40ms) with Ollama HTTP fallback (330ms) — no npm dependencies.
+Embedding uses `embed-server.py` daemon (BAAI/bge-small-en-v1.5 via sentence-transformers, ~40ms) with Ollama HTTP fallback (bge-small, ~330ms) — no npm dependencies.
 
 ## Prerequisites
 
 - `session-distillation` skill installed
 - `embed-server.py` daemon running (auto-started at container boot, Unix socket `/tmp/embed-server.sock`)
-- Ollama running with `all-minilm:latest` pulled (fallback, auto-pulled at container start)
+- Ollama running with `bge-small:latest` pulled (fallback, auto-pulled at container start)
 - Scripts at `/project/scripts/{embed-server,load-kb-to-memory,search-kb-memory}.py`
 
 ## Pre-flight: Embedding Model Check
@@ -50,7 +50,7 @@ elif curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
-sys.exit(0 if any('all-minilm' in m for m in models) else 1)" 2>/dev/null; then
+sys.exit(0 if any('bge-small' in m for m in models) else 1)" 2>/dev/null; then
   echo "✔ Ollama fallback ready"
 else
   echo "✖ No embedding model available — aborting."
