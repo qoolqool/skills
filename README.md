@@ -28,22 +28,21 @@ Run setup once to configure auto-distillation:
 
 | Skill | Purpose |
 |-------|---------|
-| `/distill-and-index` | Distill conversation into memory + KB files, then index into vector DB |
+| `/distill-and-index` | Distill conversation into knowledgebase files, then index into vector DB |
 | `/search-kb` | Semantic search over decisions, patterns, and sessions |
 | `/setup-bridge` | One-time setup: verify prerequisites, configure PreCompact hook, build initial index |
 
 ## Dependencies (Container-Built)
 
-The embedding infrastructure is built into the container image and available at container start. No additional installation is required.
+The embedding model is pulled automatically by the container entrypoint at startup. No additional installation is required.
 
 | Component | Model | Dims | Latency | Location |
 |-----------|-------|------|---------|----------|
-| **Primary** | `BAAI/bge-small-en-v1.5` (sentence-transformers) | 384 | ~40ms | `/tmp/embed-server.sock` (Unix socket) |
-| **Fallback** | `bge-small:latest` (Ollama) | 384 | ~330ms | `http://localhost:11434` (HTTP) |
+| **Embedding** | `bge-large:latest` (Ollama) | 1024 | ~330ms | `http://localhost:11434` (HTTP) |
 
-Both models produce 384-dimensional embeddings. The embed-server daemon starts automatically at container boot. If the daemon is unavailable, scripts fall back to Ollama automatically.
+The `bge-large:latest` model (~670MB) is pulled by `entrypoint-wrapper.sh` at container boot. Scripts at `/project/scripts/` use this model for all embedding operations.
 
-> **Note:** If neither the embed daemon socket nor the Ollama model is detected, the setup and search commands will abort. Ensure the container started correctly (`docker compose logs tooling | grep -E "embed|ollama"`).
+> **Note:** If the bge-large model is not detected, indexing and search will abort. Ensure the container started correctly (`docker compose logs tooling | grep -E "ollama|bge-large|model"`).
 
 ## Usage
 
@@ -51,7 +50,11 @@ Both models produce 384-dimensional embeddings. The embed-server daemon starts a
 ```
 /distill-and-index
 ```
-Runs the full pipeline: distill conversation → write memory/KB files → index into vector database.
+Runs the full pipeline: distill conversation → write knowledgebase files → index into vector database.
+
+**On Pi:** Memory files are skipped — `pi-hermes-memory` handles memory independently. Only knowledgebase files are written and indexed.
+
+**On Claude Code:** Both memory files and knowledgebase files are written and indexed.
 
 ### Semantic Search
 ```
@@ -66,23 +69,29 @@ The PreCompact hook runs distillation and indexing automatically before context 
 ## Architecture
 
 ```
-Conversation ──► Phase 1 (Distill) ──► memory/*.md + knowledgebase/*.yaml
-                                              │
-                                     Phase 2 (Index)
-                                              │
-                                 embed-server (primary, ~40ms)
-                                 Ollama HTTP  (fallback, ~330ms)
-                                              │
-                                              ▼
-                                    /project/.claude/agentdb.sqlite3
-                                    ──searchable via──► /search-kb
+Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
+                     │                        │
+                     │  (Pi: skip memory)     ▼
+                     │              Phase 2 (Index)
+                     │                        │
+                     │           Ollama bge-large (1024-dim)
+                     │           ── pulled by entrypoint ──
+                     │                        │
+                     │                        ▼
+                     │          /project/.claude/agentdb.sqlite3
+                     │          ──searchable via──► /search-kb
+                     │
+                     ▼
+            (Claude only) memory/*.md
 ```
 
 ## Output
 
-- **Memory files:** `~/.claude/projects/<project>/memory/*.md` — loaded every session via `MEMORY.md`
 - **Knowledge base:** `<project>/knowledgebase/{decisions,patterns,sessions}/*.yaml` — structured, on-demand
 - **Vector index:** `/project/.claude/agentdb.sqlite3` — searchable via `/search-kb`
+- **Memory files (Claude Code only):** `~/.claude/projects/<project>/memory/*.md` — loaded every session via `MEMORY.md`
+
+> **On Pi**, memory is managed by `pi-hermes-memory` — this plugin does not write memory files to avoid conflicts.
 
 ## License
 

@@ -21,30 +21,26 @@ Semantic search over the knowledgebase vector index. Finds decisions, patterns, 
 Before searching, verify the embedding model is available:
 
 ```bash
-if test -S /tmp/embed-server.sock; then
-  echo "✔ embed-server daemon ready"
-elif curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
+if curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
-sys.exit(0 if any('bge-small' in m for m in models) else 1)" 2>/dev/null; then
-  echo "✔ Ollama fallback ready"
+sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
+  echo "✔ bge-large ready (pulled by entrypoint)"
 else
-  echo "✖ No embedding model available — search cannot proceed."
-  echo "Check: docker compose logs tooling | grep -E 'embed|ollama|model'"
+  echo "✖ bge-large not available — search cannot proceed."
+  echo "Check: docker compose logs tooling | grep -E 'ollama|bge-large|model'"
   exit 1
 fi
 ```
 
-If neither the embed daemon socket nor the Ollama fallback model is available, abort the search and instruct the user to verify the container startup.
+If the `bge-large` model is not available, abort the search and instruct the user to verify the container startup.
 
 ## What It Does
 
-1. **Embeds** the query — fast path via `embed-server` daemon (~40ms), Ollama HTTP fallback (~330ms)
+1. **Embeds** the query via Ollama `bge-large:latest` (~330ms, 1024-dim) — model pulled by container entrypoint
 2. **Scores** all entries in `/project/.claude/agentdb.sqlite3` by cosine similarity
 3. **Returns** the top N results with relevance scores, namespace tags, and content previews
-
-Typical latency: 52-87ms with embed daemon running.
 
 ## Namespaces
 
