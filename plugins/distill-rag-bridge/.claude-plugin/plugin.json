@@ -1,7 +1,7 @@
 {
   "name": "distill-rag-bridge",
-  "description": "Persist Claude Code conversation insights across sessions — distill to memory/KB files, index into vector DB (Python+Ollama), semantic search via /search-kb",
-  "version": "2.0.0",
+  "description": "Persist conversation insights across sessions — distill to knowledgebase files, index via graphify (preferred) or vector DB fallback, search via /graphify query or /search-kb",
+  "version": "3.0.0",
   "author": {
     "name": "tooling",
     "url": "https://github.com/toolingdev"
@@ -13,6 +13,8 @@
     "distillation",
     "session",
     "persistence",
+    "knowledge-graph",
+    "graphify",
     "vector-search",
     "semantic-search",
     "claude-code"
