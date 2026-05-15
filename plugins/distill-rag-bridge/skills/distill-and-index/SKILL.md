@@ -1,6 +1,6 @@
 ---
 name: distill-and-index
-description: Distill conversation insights into durable knowledgebase files, then index them for search. Uses graphify (preferred) or vector DB fallback.
+description: Distill conversation insights into durable knowledgebase files, then index them for search. Uses vector DB (preferred) or graphify fallback.
 allowed-tools: Bash Read Write Edit
 ---
 
@@ -14,17 +14,17 @@ This skill detects which indexing system is available and uses the best one:
 
 | Mode | Detection | Index Method | Search Method |
 |------|-----------|-------------|----------------|
-| **Graphify** ✅ preferred | `graphify` Python package importable + `graphify-out/graph.json` exists | `/graphify --update` (structural graph with full content) | `/graphify query`, `/graphify explain`, `/graphify path` |
-| **Vector DB** fallback | Ollama running + `bge-large:latest` model | `load-kb-to-memory.py` (cosine similarity over embeddings) | `/search-kb` |
+| **Vector DB** ✅ preferred | Ollama running + `bge-large:latest` model | `load-kb-to-memory.py` (cosine similarity over embeddings) | `/search-kb` |
+| **Graphify** fallback | `graphify` Python package importable + `graphify-out/graph.json` exists | `/graphify --update` (structural graph with full content) | `/graphify query`, `/graphify explain`, `/graphify path` |
 
-**Why graphify is preferred:** It stores relationships, communities, and full document content in one self-contained file. No external model (~670 MB), no embedding server, no separate SQLite DB. Graph traversal answers questions that cosine similarity cannot.
+**Why vector DB is preferred:** It provides fast, deterministic, ranked search via cosine similarity over pre-computed embeddings. Results are concise and easy for small LLMs to process. Graphify is available as a structural fallback for relationship/path queries on capable models.
 
 ## Platform Behavior
 
 | Platform | Memory files | Knowledgebase files | Index |
 |----------|-------------|---------------------|-------|
-| **Pi** | ❌ Skipped — handled by `pi-hermes-memory` | ✅ decisions, patterns, sessions | ✅ graphify or vector DB |
-| **Claude Code** | ✅ `~/.claude/projects/*/memory/` | ✅ decisions, patterns, sessions | ✅ graphify or vector DB |
+| **Pi** | ❌ Skipped — handled by `pi-hermes-memory` | ✅ decisions, patterns, sessions | ✅ vector DB or graphify |
+| **Claude Code** | ✅ `~/.claude/projects/*/memory/` | ✅ decisions, patterns, sessions | ✅ vector DB or graphify |
 
 **On Pi**, do NOT write memory entries (`MEMORY.md`, `USER.md`, etc.). The `pi-hermes-memory` extension already manages all memory — writing duplicate entries causes conflicts. Focus exclusively on knowledgebase distillation and indexing.
 
@@ -42,26 +42,26 @@ This skill detects which indexing system is available and uses the best one:
 Before Phase 2, determine which indexing method to use:
 
 ```bash
-# Check for graphify (preferred)
-if python3 -c "import graphify" 2>/dev/null && [ -f graphify-out/graph.json ]; then
-  echo "INDEX_MODE=graphify"
-else
-  # Check for vector DB fallback
-  if curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
+# Check for vector DB (preferred)
+if curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
 sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
-    echo "INDEX_MODE=vectordb"
+  echo "INDEX_MODE=vectordb"
+else
+  # Check for graphify fallback
+  if python3 -c "import graphify" 2>/dev/null && [ -f graphify-out/graph.json ]; then
+    echo "INDEX_MODE=graphify"
   else
     echo "INDEX_MODE=none"
-    echo "⚠ No indexer available. Run Phase 1 (distill) only — files will be indexed when graphify or Ollama becomes available."
+    echo "⚠ No indexer available. Run Phase 1 (distill) only — files will be indexed when Ollama with bge-large or graphify becomes available."
   fi
 fi
 ```
 
-- If `graphify`: use `/graphify --update` in Phase 2 (graphify re-extracts new/changed files and merges into the existing graph)
 - If `vectordb`: use `load-kb-to-memory.py` in Phase 2 (traditional embedding pipeline)
+- If `graphify`: use `/graphify --update` in Phase 2 (graphify re-extracts new/changed files and merges into the existing graph)
 - If `none`: skip Phase 2. Files are written to `knowledgebase/` and will be found on the next successful index run.
 
 ## Architecture
@@ -72,21 +72,21 @@ Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
                      │  (Pi: skip memory)     ▼
                      │              Phase 2 (Index)
                      │             ┌───────────────────┐
-                     │             │  graphify present? │
+                     │             │  vector DB ready?   │
                      │             └───┬───────────┬───┘
                      │            yes  │           │ no
                      │                 ▼           ▼
-                     │         /graphify        Ollama bge-large
-                     │          --update       (1024-dim)
+                     │      Ollama bge-large    /graphify
+                     │       (1024-dim)          --update
                      │              │               │
                      │              ▼               ▼
-                     │     graphify-out/       agentdb.sqlite3
-                     │     graph.json         ──searchable──► /search-kb
-                     │     (self-contained)
-                     │     ──searchable──►
-                     │     /graphify query
-                     │     /graphify explain
-                     │     /graphify path
+                     │     agentdb.sqlite3    graphify-out/
+                     │  ──searchable──►       graph.json
+                     │      /search-kb        (self-contained)
+                     │                        ──searchable──►
+                     │                        /graphify query
+                     │                        /graphify explain
+                     │                        /graphify path
                      │
                      ▼
             (Claude only) memory/*.md
@@ -95,9 +95,9 @@ Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
 ## Prerequisites
 
 - `session-distillation` skill installed
-- **For graphify mode:** `graphify` Python package (installed via `pip install graphifyy`) and an existing graph at `graphify-out/graph.json` (run `/graphify .` once to build)
-- **For vector DB fallback:** Ollama running with `bge-large:latest` pulled — handled automatically by container entrypoint (`entrypoint-wrapper.sh`)
-- Scripts at `/project/scripts/{load-kb-to-memory,search-kb-memory}.py` (only needed for vector DB fallback)
+- **For vector DB mode:** Ollama running with `bge-large:latest` pulled — handled automatically by container entrypoint (`entrypoint-wrapper.sh`)
+- **For graphify fallback:** `graphify` Python package (installed via `pip install graphifyy`) and an existing graph at `graphify-out/graph.json` (run `/graphify .` once to build)
+- Scripts at `/project/scripts/{load-kb-to-memory,search-kb-memory}.py` (needed for vector DB mode)
 - (Pi only) `pi-hermes-memory` extension installed — manages all memory file writing
 
 ## Phase 1 — Distill (always runs)
@@ -138,37 +138,9 @@ Run the full session-distillation workflow including both memory and knowledgeba
 
 ## Phase 2 — Index
 
-### Graphify mode (preferred)
+### Vector DB mode (preferred)
 
-If graphify is available, run an incremental update to merge new/changed files into the existing graph:
-
-```bash
-/graphify --update
-```
-
-This re-extracts only new/changed files since the last run and merges them into `graphify-out/graph.json`. Graphify stores relationships, community structure, and full document content — making the knowledgebase searchable via `/graphify query`, `/graphify explain`, and `/graphify path`.
-
-**No external model or embedding server required.** The graph is self-contained.
-
-Verify after indexing:
-
-```bash
-python3 -c "
-import json
-from pathlib import Path
-if Path('graphify-out/graph.json').exists():
-    data = json.loads(Path('graphify-out/graph.json').read_text())
-    nodes = len(data.get('nodes', []))
-    edges = len(data.get('links', data.get('edges', [])))
-    print(f'graph.json: {nodes} nodes, {edges} edges')
-else:
-    print('graph.json not found — run /graphify . first')
-"
-```
-
-### Vector DB fallback
-
-If graphify is not available, build the vector index from knowledgebase YAML files:
+If the vector DB is ready, build the vector index from knowledgebase YAML files:
 
 ```bash
 python3 /project/scripts/load-kb-to-memory.py
@@ -189,9 +161,47 @@ for r in c: print(f'  {r[0]}: {r[1]}')
 "
 ```
 
+### Graphify fallback
+
+If graphify is available, run an incremental update to merge new/changed files into the existing graph:
+
+```bash
+/graphify --update
+```
+
+This re-extracts only new/changed files since the last run and merges them into `graphify-out/graph.json`. Graphify stores relationships, community structure, and full document content — making the knowledgebase searchable via `/graphify query`, `/graphify explain`, and `/graphify path`.
+
+**No external model or embedding server required.** The graph is self-contained, but graphify is heavy for small LLMs.
+
+Verify after indexing:
+
+```bash
+python3 -c "
+import json
+from pathlib import Path
+if Path('graphify-out/graph.json').exists():
+    data = json.loads(Path('graphify-out/graph.json').read_text())
+    nodes = len(data.get('nodes', []))
+    edges = len(data.get('links', data.get('edges', [])))
+    print(f'graph.json: {nodes} nodes, {edges} edges')
+else:
+    print('graph.json not found — run /graphify . first')
+"
+```
+
 ## Phase 3 — Search
 
-### Graphify mode (preferred)
+### Vector DB mode (preferred)
+
+Search the vector database:
+
+```bash
+python3 /project/scripts/search-kb-memory.py "<query>" [-n namespace] [-l limit]
+```
+
+Common namespaces: `decisions`, `patterns`, `sessions`.
+
+### Graphify fallback
 
 Use graphify's query commands to find relevant prior knowledge:
 
@@ -201,17 +211,7 @@ Use graphify's query commands to find relevant prior knowledge:
 /graphify path "Lean Container" "Embedding Pipeline"
 ```
 
-Graphify provides structural answers: relationships between concepts, community membership, surprising connections, and shortest paths. These are capabilities that cosine similarity cannot provide.
-
-### Vector DB fallback
-
-Search the vector database:
-
-```bash
-python3 /project/scripts/search-kb-memory.py "<query>" [-n namespace] [-l limit]
-```
-
-Common namespaces: `decisions`, `patterns`, `sessions`.
+Graphify provides structural answers: relationships between concepts, community membership, surprising connections, and shortest paths. These are capabilities that cosine similarity cannot provide, but graphify is heavy for small LLMs.
 
 ### When to search
 
@@ -226,7 +226,17 @@ Agents treat the distill-and-index pipeline as a two-way memory system:
 
 ### Writing (Phase 1 → 2)
 
-**On Pi (graphify mode):**
+**On Pi (vector DB mode):**
+```
+Agent completes work
+  → distill-and-index runs (manual or PreCompact hook)
+    → Phase 1: session-distillation scans conversation, writes KB files only
+               (memory is skipped — pi-hermes-memory handles that independently)
+    → Phase 2: KB files are embedded and indexed into SQLite vector DB
+      → Knowledge becomes searchable by future sessions via /search-kb
+```
+
+**On Pi (graphify fallback):**
 ```
 Agent completes work
   → distill-and-index runs (manual or PreCompact hook)
@@ -236,20 +246,20 @@ Agent completes work
       → Knowledge becomes searchable via /graphify query, explain, path
 ```
 
-**On Pi (vector DB fallback):**
-```
-Agent completes work
-  → distill-and-index runs (manual or PreCompact hook)
-    → Phase 1: session-distillation scans conversation, writes KB files only
-    → Phase 2: KB files are embedded and indexed into SQLite vector DB
-      → Knowledge becomes searchable by future sessions via /search-kb
-```
-
 **On Claude Code:** Same flow, but Phase 1 also writes memory files.
 
 ### Reading (Phase 3)
 
-**Graphify mode:**
+**Vector DB mode:**
+```
+Agent starts new task
+  → /search-kb "<topic>" to find relevant prior knowledge
+    → "has anyone solved something like this before?"
+    → "what decisions shaped this area of the code?"
+    → "what gotchas should I watch out for?"
+```
+
+**Graphify fallback:**
 ```
 Agent starts new task
   → /graphify query "topic" — find related concepts and their connections
@@ -259,64 +269,38 @@ Agent starts new task
      to inform approach and avoid known traps
 ```
 
-**Vector DB fallback:**
-```
-Agent starts new task
-  → /search-kb "<topic>" to find relevant prior knowledge
-    → "has anyone solved something like this before?"
-    → "what decisions shaped this area of the code?"
-    → "what gotchas should I watch out for?"
-```
-
 ### Concrete agent patterns
-
-**Before implementing a feature (graphify):**
-1. `/graphify query "feature architecture"` — find related decisions and their connections
-2. `/graphify explain "Component X"` — understand context around specific concepts
-3. Apply known constraints, avoid rejected alternatives
 
 **Before implementing a feature (vector DB):**
 1. `/search-kb "<feature> architecture"` — find design decisions
 2. `/search-kb "PATTERN#* <domain>"` — find relevant patterns
 3. Apply known constraints, avoid rejected alternatives
 
-**When debugging a problem (graphify):**
-1. `/graphify query "error symptom"` — find related nodes and connections
-2. `/graphify path "Error" "Root Cause"` — trace the dependency chain
-3. Check community membership for related components
+**Before implementing a feature (graphify):**
+1. `/graphify query "feature architecture"` — find related decisions and their connections
+2. `/graphify explain "Component X"` — understand context around specific concepts
+3. Apply known constraints, avoid rejected alternatives
 
 **When debugging a problem (vector DB):**
 1. `/search-kb "<error message>"` — find past encounters
 2. Check `knowledgebase/index.yaml` quickReference gotchas
 3. Look for troubleshooting patterns matching the stack trace
 
+**When debugging a problem (graphify):**
+1. `/graphify query "error symptom"` — find related nodes and connections
+2. `/graphify path "Error" "Root Cause"` — trace the dependency chain
+3. Check community membership for related components
+
 **When a session ends (PreCompact hook):**
 1. Distill findings into knowledgebase (skip memory on Pi)
-2. Index: `/graphify --update` (preferred) or `load-kb-to-memory.py` (fallback)
+2. Index: `load-kb-to-memory.py` (preferred) or `/graphify --update` (fallback)
 3. Next session picks up from where this one left off
 
 ## Auto-Run via Hook
 
-### On Pi — graphify mode
+### On Pi — vector DB mode
 
 For automatic distillation before context compaction, add to `.pi/settings.local.json`:
-
-```json
-{
-  "hooks": {
-    "PreCompact": [{
-      "matcher": "auto",
-      "hooks": [{
-        "type": "agent",
-        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into knowledgebase files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
-        "statusMessage": "Distilling session and updating knowledge graph..."
-      }]
-    }]
-  }
-}
-```
-
-### On Pi — vector DB fallback
 
 ```json
 {
@@ -333,7 +317,7 @@ For automatic distillation before context compaction, add to `.pi/settings.local
 }
 ```
 
-### On Claude Code — graphify mode
+### On Pi — graphify fallback
 
 ```json
 {
@@ -342,7 +326,7 @@ For automatic distillation before context compaction, add to `.pi/settings.local
       "matcher": "auto",
       "hooks": [{
         "type": "agent",
-        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
+        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into knowledgebase files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
         "statusMessage": "Distilling session and updating knowledge graph..."
       }]
     }]
@@ -350,7 +334,7 @@ For automatic distillation before context compaction, add to `.pi/settings.local
 }
 ```
 
-### On Claude Code — vector DB fallback
+### On Claude Code — vector DB mode
 
 ```json
 {
@@ -367,22 +351,26 @@ For automatic distillation before context compaction, add to `.pi/settings.local
 }
 ```
 
+### On Claude Code — graphify fallback
+
+```json
+{
+  "hooks": {
+    "PreCompact": [{
+      "matcher": "auto",
+      "hooks": [{
+        "type": "agent",
+        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
+        "statusMessage": "Distilling session and updating knowledge graph..."
+      }]
+    }]
+  }
+}
+```
+
 ## Output
 
 After running, confirm:
-
-**Graphify mode (Pi):**
-1. **KB entries created** — `cat knowledgebase/index.yaml`
-2. **Graph updated** — `python3 -c "import json; d=json.loads(open('graphify-out/graph.json').read()); print(len(d.get('nodes',[])), 'nodes,', len(d.get('links',d.get('edges',[]))), 'edges')"`
-3. **Search works** — `/graphify query "test query"`
-4. **Memory untouched** — hermes-memory manages memory files independently
-
-**Graphify mode (Claude Code):**
-1. **Memory files written** — `ls ~/.claude/projects/*/memory/`
-2. **MEMORY.md updated** — `cat ~/.claude/projects/*/memory/MEMORY.md`
-3. **KB entries created** — `cat knowledgebase/index.yaml`
-4. **Graph updated** — same as Pi
-5. **Search works** — `/graphify query "test query"`
 
 **Vector DB mode (Pi):**
 1. **KB entries created** — `cat knowledgebase/index.yaml`
@@ -396,3 +384,16 @@ After running, confirm:
 3. **KB entries created** — `cat knowledgebase/index.yaml`
 4. **Vector index populated** — `python3 -c "import sqlite3; db=sqlite3.connect('/project/.claude/agentdb.sqlite3'); print(db.execute('SELECT COUNT(*) FROM embeddings').fetchone()[0], 'entries')"`
 5. **Search works** — `/search-kb "test query" -l 3`
+
+**Graphify fallback mode (Pi):**
+1. **KB entries created** — `cat knowledgebase/index.yaml`
+2. **Graph updated** — `python3 -c "import json; d=json.loads(open('graphify-out/graph.json').read()); print(len(d.get('nodes',[])), 'nodes,', len(d.get('links',d.get('edges',[]))), 'edges')"`
+3. **Search works** — `/graphify query "test query"`
+4. **Memory untouched** — hermes-memory manages memory files independently
+
+**Graphify fallback mode (Claude Code):**
+1. **Memory files written** — `ls ~/.claude/projects/*/memory/`
+2. **MEMORY.md updated** — `cat ~/.claude/projects/*/memory/MEMORY.md`
+3. **KB entries created** — `cat knowledgebase/index.yaml`
+4. **Graph updated** — same as Pi
+5. **Search works** — `/graphify query "test query"`
