@@ -1,6 +1,6 @@
 {
   "name": "distill-rag-bridge",
-  "description": "Persist conversation insights across sessions — distill to knowledgebase files, index via graphify (preferred) or vector DB fallback, search via /graphify query or /search-kb",
+  "description": "Persist conversation insights across sessions — distill to knowledgebase files, index via vector DB (preferred) or graphify fallback, search via /search-kb or /graphify query",
   "version": "3.0.0",
   "author": {
     "name": "tooling",

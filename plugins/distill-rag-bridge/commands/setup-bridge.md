@@ -25,33 +25,33 @@ Configure the distill-rag-bridge plugin. Run this once after installation.
 Determine which search system to use:
 
 ```bash
-# Check for graphify (preferred)
-if python3 -c "import graphify" 2>/dev/null; then
-  if [ -f graphify-out/graph.json ]; then
-    echo "MODE=graphify (existing graph found)"
-  else
-    echo "MODE=graphify-init (graphify installed, no graph yet — will build)"
-  fi
-else
-  # Check for vector DB fallback
-  if curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
+# Check for vector DB (preferred)
+if curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
 sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
-    echo "MODE=vectordb (graphify not installed, Ollama bge-large available)"
+  echo "MODE=vectordb (Ollama bge-large available)"
+else
+  # Check for graphify fallback
+  if python3 -c "import graphify" 2>/dev/null; then
+    if [ -f graphify-out/graph.json ]; then
+      echo "MODE=graphify (existing graph found)"
+    else
+      echo "MODE=graphify-init (graphify installed, no graph yet — will build)"
+    fi
   else
-    echo "ERROR: Neither graphify nor Ollama bge-large is available."
-    echo "  Install graphify: pip install graphifyy"
-    echo "  Or ensure Ollama is running with bge-large:latest model."
+    echo "ERROR: Neither Ollama bge-large nor graphify is available."
+    echo "  Ensure Ollama is running with bge-large:latest model."
+    echo "  Or install graphify: pip install graphifyy"
     exit 1
   fi
 fi
 ```
 
-**If graphify is available**, skip Steps 1.1 and 3.1 — no embedding model or vector DB scripts needed.
+**If vector DB is available**, proceed with the Ollama/bge-large prerequisites.
 
-**If only vector DB is available**, proceed with the Ollama/bge-large prerequisites.
+**If only graphify is available**, skip Steps 1.1 and 3.1 — no embedding model or vector DB scripts needed.
 
 ## Step 1 — Verify Prerequisites
 
@@ -62,9 +62,7 @@ ls .claude/skills/session-distillation  # Claude Code
 # or check available skills list for Pi
 ```
 
-### 1b — Verify embedding model (vector DB mode only)
-
-Skip this step if graphify mode was detected.
+### 1b — Verify embedding model (vector DB mode)
 
 The bridge requires an embedding model. The container entrypoint pulls `bge-large:latest` at startup. Verify it's available before proceeding:
 
@@ -91,45 +89,9 @@ fi
 
 **Do not proceed** with vector DB mode if this check fails.
 
+Skip this step if graphify fallback mode was detected.
+
 ## Step 2 — Configure Auto-Distillation
-
-### Graphify mode (Pi)
-
-Create `.pi/settings.local.json`:
-
-```json
-{
-  "hooks": {
-    "PreCompact": [{
-      "matcher": "auto",
-      "hooks": [{
-        "type": "agent",
-        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into knowledgebase files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
-        "statusMessage": "Distilling session and updating knowledge graph..."
-      }]
-    }]
-  }
-}
-```
-
-### Graphify mode (Claude Code)
-
-Create `.claude/settings.local.json`:
-
-```json
-{
-  "hooks": {
-    "PreCompact": [{
-      "matcher": "auto",
-      "hooks": [{
-        "type": "agent",
-        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
-        "statusMessage": "Distilling session and updating knowledge graph..."
-      }]
-    }]
-  }
-}
-```
 
 ### Vector DB mode (Pi)
 
@@ -169,9 +131,77 @@ Create `.claude/settings.local.json`:
 }
 ```
 
+### Graphify fallback mode (Pi)
+
+Create `.pi/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [{
+      "matcher": "auto",
+      "hooks": [{
+        "type": "agent",
+        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into knowledgebase files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
+        "statusMessage": "Distilling session and updating knowledge graph..."
+      }]
+    }]
+  }
+}
+```
+
+### Graphify fallback mode (Claude Code)
+
+Create `.claude/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [{
+      "matcher": "auto",
+      "hooks": [{
+        "type": "agent",
+        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run /graphify --update to merge new files into the knowledge graph. Verify node counts.",
+        "statusMessage": "Distilling session and updating knowledge graph..."
+      }]
+    }]
+  }
+}
+```
+
 ## Step 3 — Build Initial Index
 
-### 3a — Graphify mode
+### 3a — Vector DB mode
+
+Build the vector index from existing KB files:
+
+```bash
+# Verify scripts exist
+ls -l /project/scripts/load-kb-to-memory.py
+ls -l /project/scripts/search-kb-memory.py
+
+# Build the vector index
+python3 /project/scripts/load-kb-to-memory.py
+```
+
+Verify:
+
+```bash
+python3 -c "
+import sqlite3
+db = sqlite3.connect('/project/.claude/agentdb.sqlite3')
+c = db.execute('SELECT namespace, COUNT(*) FROM embeddings GROUP BY namespace')
+for r in c: print(f'  {r[0]}: {r[1]}')
+"
+```
+
+Test search:
+
+```
+/search-kb "architecture decisions"
+```
+
+### 3b — Graphify fallback mode
 
 If a graph already exists, run an incremental update:
 
@@ -205,36 +235,6 @@ Test search:
 
 ```
 /graphify query "architecture decisions"
-```
-
-### 3b — Vector DB mode
-
-Build the vector index from existing KB files:
-
-```bash
-# Verify scripts exist
-ls -l /project/scripts/load-kb-to-memory.py
-ls -l /project/scripts/search-kb-memory.py
-
-# Build the vector index
-python3 /project/scripts/load-kb-to-memory.py
-```
-
-Verify:
-
-```bash
-python3 -c "
-import sqlite3
-db = sqlite3.connect('/project/.claude/agentdb.sqlite3')
-c = db.execute('SELECT namespace, COUNT(*) FROM embeddings GROUP BY namespace')
-for r in c: print(f'  {r[0]}: {r[1]}')
-"
-```
-
-Test search:
-
-```
-/search-kb "architecture decisions"
 ```
 
 ## Step 4 — Verify
