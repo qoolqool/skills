@@ -1,138 +1,107 @@
 # distill-rag-bridge
 
-Persist coding agent conversation insights across sessions. Distills decisions, gotchas, architecture realities, and preferences into durable knowledgebase files that survive context compaction. Indexes them for search using graphify (preferred) or vector DB fallback.
+Persist coding agent conversation insights across sessions. Distills decisions, gotchas, architecture realities, and preferences into durable knowledgebase files that survive context compaction. Indexes them for search using Vector DB (local) and Central KB (shared).
 
-## Dual-Mode Architecture
+## Two-Tier Indexing
 
-The plugin auto-detects the best available indexing method:
+| Mode | Scope | Index Method | Search Method | Dependencies |
+|------|-------|-------------|---------------|-------------|
+| **Vector DB** | Local | `load-kb-to-memory.py` (cosine similarity over 1024-dim embeddings) | `search-kb-memory.py` or `search-kb` skill | embed-server or Ollama + `bge-large:latest` |
+| **Central KB** | Shared (cross-project) | `kb submit` (pushes entries to shared server) | `kb search`, `kb explain` | `kb` CLI + Central KB server running |
 
-| Mode | Detection | Index | Search | Size |
-|------|-----------|-------|--------|------|
-| **Graphify** ✅ preferred | `graphify` package + `graphify-out/graph.json` | `/graphify --update` (structural graph) | `/graphify query`, `/graphify explain`, `/graphify path` | Self-contained JSON (~KB) |
-| **Vector DB** fallback | Ollama + `bge-large:latest` | `load-kb-to-memory.py` (embeddings) | `/search-kb` (cosine similarity) | ~670 MB model + SQLite |
-
-**Why graphify is preferred:** It stores relationships, communities, and full document content in one self-contained file. No external model, no embedding server, no separate database. Graph traversal answers questions that cosine similarity cannot — like "how does X connect to Y?" or "what are the cross-cutting patterns?"
-
-## Installation
-
-Add the marketplace as a submodule, or clone directly:
-
-```bash
-git clone https://github.com/qoolqool/skills.git ~/.local/share/skill-marketplace
-```
-
-Register the plugin in `~/.pi/agent/settings.json` under `"packages"`:
-
-```json
-"../../.local/share/skill-marketplace/plugins/distill-rag-bridge"
-```
-
-Run setup once to configure auto-distillation:
-
-```
-/setup-bridge
-```
-
-**Prerequisite:** `session-distillation` skill.
+Both tiers can run simultaneously — Vector DB for fast local search, Central KB for cross-project knowledge sharing.
 
 ## Skills
 
-| Skill | Purpose |
-|-------|---------|
-| `/distill-and-index` | Distill conversation into knowledgebase files, then index (graphify or vector DB) |
-| `/search-kb` | Search knowledgebase — uses graphify (preferred) or vector DB fallback |
-| `/setup-bridge` | One-time setup: detect indexer, verify prerequisites, configure PreCompact hook, build initial index |
+| Skill | Description |
+|-------|-------------|
+| `/distill-and-index` | Distill conversation into knowledgebase files, then index (Vector DB + Central KB) |
+| `/search-kb` | Search knowledgebase across all available backends (local Vector DB + Central KB) |
 
-## Dependencies
+## Prerequisites
 
-### Graphify mode (preferred)
+### For Vector DB mode
 
-| Component | Install | Notes |
-|-----------|---------|-------|
-| **graphify** | `pip install graphifyy` | Self-contained — no external model or DB needed |
-| **Initial graph** | `/graphify .` (run once) | Builds `graphify-out/graph.json` from project files |
+| Requirement | How | Check |
+|-------------|-----|-------|
+| embed-server or Ollama | embed-server socket/HTTP (~40-100ms) or Ollama (~330ms) | see pre-flight |
+| bge-large model | Auto-detected; pulled by `entrypoint-wrapper.sh` if Ollama is source | `ollama list \| grep bge-large` |
+| Python 3.11+ | Pre-installed | `python3 --version` |
+| Scripts | `/project/scripts/{load-kb-to-memory,search-kb-memory}.py` | `ls /project/scripts/` |
 
-No Ollama, no embedding model, no SQLite database. The graph is a single JSON file.
+### For Central KB mode
 
-### Vector DB fallback
+| Requirement | How | Check |
+|-------------|-----|-------|
+| `kb` CLI | Installed by Dockerfile or install script | `command -v kb` |
+| Central KB server running | Docker container `tooling-central` | `kb health` |
+| Embedding source for submit | Same as Vector DB (embed-server or Ollama) | see pre-flight |
 
-| Component | Model | Dims | Latency | Location |
-|-----------|-------|------|---------|----------|
-| **Embedding** | `bge-large:latest` (Ollama) | 1024 | ~330ms | `http://localhost:11434` (HTTP) |
+> **No model pull needed on fresh clone.** The embed-server HTTP sidecar at `host.containers.internal:9001` provides embeddings without downloading any model.
 
-The `bge-large:latest` model (~670MB) is pulled by `entrypoint-wrapper.sh` at container boot. Scripts at `/project/scripts/` use this model for all embedding operations.
+## Quick Start
 
-> **Note:** If the bge-large model is not detected, indexing and search will abort. Install graphify instead, or ensure the container started correctly (`docker compose logs tooling | grep -E "ollama|bge-large|model"`).
+### Indexing (distill-and-index)
 
-## Usage
+Auto-detects available indexers:
 
-### Distill & Index
-```
+```bash
+# Run the skill — it detects what's available and uses all of it
 /distill-and-index
 ```
-Runs the full pipeline: distill conversation → write knowledgebase files → index.
 
-**Auto-detects:** If graphify is available, runs `/graphify --update`. Otherwise, indexes into the vector DB via `load-kb-to-memory.py`.
+If Vector DB + Central KB are both available, both run. If neither, only Phase 1 (distill) runs.
 
-**On Pi:** Memory files are skipped — `pi-hermes-memory` handles memory independently. Only knowledgebase files are written and indexed.
+### Search (search-kb)
 
-**On Claude Code:** Both memory files and knowledgebase files are written and indexed.
+```bash
+# Local search
+python3 /project/scripts/search-kb-memory.py "embedding decisions" -n decisions
 
-### Search Knowledgebase
+# Central KB search (no local model needed — server generates query vectors)
+kb search "embedding decisions" --scope my-project
 
-**Graphify mode:**
-```
-/graphify query "embedding model decisions"           # broad context (BFS)
-/graphify explain "bge-large Embedding Model"          # everything about one concept
-/graphify path "Lean Container" "Embedding Pipeline"  # how two things connect
-```
-
-**Vector DB fallback:**
-```
-/search-kb "<query>"
-/search-kb "<query>" -n decisions -l 10
+# Structured explain — agent synthesizes narrative
+kb explain "embedding decisions" --scope my-project
 ```
 
-### Automatic
-The PreCompact hook runs distillation and indexing automatically before context compaction. Configure via `/setup-bridge`.
+The `search-kb` skill searches all available backends and the agent synthesizes a unified narrative.
 
 ## Architecture
 
 ```
-Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
+Conversation ──► distill-and-index ──► knowledgebase/*.yaml
                      │                        │
-                     │  (Pi: skip memory)     ▼
-                     │              Phase 2 (Index)
-                     │             ┌───────────────────┐
-                     │             │  graphify present? │
-                     │             └───┬───────────┬───┘
-                     │            yes  │           │ no
-                     │                 ▼           ▼
-                     │         /graphify        Ollama bge-large
-                     │          --update       (1024-dim)
-                     │              │               │
-                     │              ▼               ▼
-                     │     graphify-out/       agentdb.sqlite3
-                     │     graph.json         ──searchable──► /search-kb
-                     │     (self-contained)
-                     │     ──searchable──►
-                     │     /graphify query
-                     │     /graphify explain
-                     │     /graphify path
+                     │  (Pi: skip memory)       ▼
+                     │              detect available indexers
+                     │             ┌──────────────────────┐
+                     │             │  embed-server socket?  │
+                     │             │  embed-server HTTP?    │
+                     │             │  Ollama bge-large?     │
+                     │             └────┬──────────┬────────┘
+                     │             vectordb    central-kb
+                     │                 │            │
+                     │                 ▼            ▼
+                     │          load-kb-to-    kb submit
+                     │          memory.py     (1024-dim)
+                     │              │            │
+                     │              ▼            ▼
+                     │        agentdb.      Central KB
+                     │        sqlite3       server
+                     │        (local)    (shared,
+                     │                   cross-project)
+                     │          │            │
+                     │          ▼            ▼
+                     │    search-kb     kb search/explain
+                     │    memory.py     kb pull/drift
                      │
                      ▼
             (Claude only) memory/*.md
 ```
 
-## Output
+## Output Files
 
-- **Knowledge base:** `<project>/knowledgebase/{decisions,patterns,sessions}/*.yaml` — structured, on-demand
-- **Graphify mode:** `graphify-out/graph.json` — self-contained knowledge graph with relationships, communities, and full content. Searchable via `/graphify query|explain|path`.
-- **Vector DB mode:** `/project/.claude/agentdb.sqlite3` — searchable via `/search-kb`
-- **Memory files (Claude Code only):** `~/.claude/projects/<project>/memory/*.md` — loaded every session via `MEMORY.md`
-
-> **On Pi**, memory is managed by `pi-hermes-memory` — this plugin does not write memory files to avoid conflicts.
-
-## License
-
-MIT
+| File | Mode | Searchable via |
+|------|------|---------------|
+| `agentdb.sqlite3` | Vector DB (local) | `search-kb-memory.py` or `search-kb` skill |
+| Central KB server | Central KB (shared) | `kb search`, `kb explain`, `search-kb` skill |

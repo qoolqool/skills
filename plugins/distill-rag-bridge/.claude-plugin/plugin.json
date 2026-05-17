@@ -1,7 +1,7 @@
 {
   "name": "distill-rag-bridge",
-  "description": "Persist conversation insights across sessions — distill to knowledgebase files, index via vector DB (preferred) or graphify fallback, search via /search-kb or /graphify query",
-  "version": "3.0.0",
+  "description": "Persist conversation insights across sessions — distill to knowledgebase files, index via vector DB + Central KB, search via /search-kb",
+  "version": "4.0.0",
   "author": {
     "name": "tooling",
     "url": "https://github.com/toolingdev"
@@ -13,10 +13,10 @@
     "distillation",
     "session",
     "persistence",
-    "knowledge-graph",
-    "graphify",
     "vector-search",
     "semantic-search",
+    "central-kb",
+    "knowledge-base",
     "claude-code"
   ]
 }
