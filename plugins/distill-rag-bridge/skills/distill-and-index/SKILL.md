@@ -208,7 +208,7 @@ If an embedding source is available (embed-server socket or Ollama), build the v
 python3 /project/scripts/load-kb-to-memory.py
 ```
 
-This reads all `knowledgebase/{decisions,patterns,sessions}/*.yaml` files, generates 1024-dim embeddings (embed-server socket preferred, Ollama fallback), and stores them in `/project/.claude/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
+This reads all `knowledgebase/{decisions,patterns,sessions}/*.yaml` files, generates 1024-dim embeddings (embed-server socket preferred, Ollama fallback), and stores them in `/project/.agent/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
 
 **Do not proceed** if no embedding source is available. Knowledgebase files are already written — they will be indexed on the next successful run.
 
@@ -217,7 +217,7 @@ Verify after indexing:
 ```bash
 python3 -c "
 import sqlite3
-db = sqlite3.connect('/project/.claude/agentdb.sqlite3')
+db = sqlite3.connect('/project/.agent/agentdb.sqlite3')
 c = db.execute('SELECT namespace, COUNT(*) FROM embeddings GROUP BY namespace')
 for r in c: print(f'  {r[0]}: {r[1]}')
 "
@@ -383,7 +383,7 @@ After running, confirm:
 3. **KB entries created** — `cat knowledgebase/index.yaml`
 
 **Vector DB (if available):**
-1. **Vector index populated** — `python3 -c "import sqlite3; db=sqlite3.connect('/project/.claude/agentdb.sqlite3'); print(db.execute('SELECT COUNT(*) FROM embeddings').fetchone()[0], 'entries')"`
+1. **Vector index populated** — `python3 -c "import sqlite3; db=sqlite3.connect('/project/.agent/agentdb.sqlite3'); print(db.execute('SELECT COUNT(*) FROM embeddings').fetchone()[0], 'entries')"`
 2. **Search works** — `python3 /project/scripts/search-kb-memory.py "test" -l 3`
 
 **Central KB (if available):**
