@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Load knowledgebase YAML files into a persistent vector database.
-Uses embed-server (sentence-transformers) for embeddings + SQLite for storage.
-Embedding source: local Unix socket (/tmp/embed-server.sock) or HTTP sidecar.
+Uses bge-large (1024-dim) embeddings via HTTP sidecar or Ollama + SQLite for storage.
+Embedding source: Central KB HTTP sidecar (host.containers.internal:9001) or Ollama.
 """
 import json
 import sqlite3
