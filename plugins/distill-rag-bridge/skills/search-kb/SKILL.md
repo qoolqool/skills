@@ -23,38 +23,47 @@ Both tiers search independently and return complementary results. The agent synt
 
 Before searching, determine which backends are available:
 
+**Important:** Central KB search does **NOT** require client-side embeddings. Only vector DB search needs embeddings. If embed-server is unavailable, Central KB will still work — do NOT pull Ollama just for search.
+
 ```bash
 SEARCH_MODES=()
 
-# Check for local vector DB
+# Check for local vector DB (needs client-side embeddings)
 HAS_EMBED=false
 if [ -S /tmp/embed-server.sock ]; then
   HAS_EMBED=true
+  echo "✓ Embeddings: embed-server socket (~40ms)"
 elif curl -sf http://host.containers.internal:9001/health 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 sys.exit(0 if d.get('model_ready') else 1)" 2>/dev/null; then
   HAS_EMBED=true
+  echo "✓ Embeddings: embed-server HTTP (~100ms)"
 elif curl -sf http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
 sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
   HAS_EMBED=true
+  echo "⚠ Embeddings: Ollama (~330ms) - consider starting embed-server instead"
 fi
 
 if [ "$HAS_EMBED" = true ] && [ -f /project/.agent/agentdb.sqlite3 ]; then
   SEARCH_MODES+=("vectordb")
+  echo "✓ Vector DB: available (local search)"
 fi
 
 # Check for Central KB (no client-side embeddings needed for search)
 if command -v kb &>/dev/null && kb health &>/dev/null; then
   SEARCH_MODES+=("central-kb")
+  echo "✓ Central KB: available (shared search, no embeddings needed)"
 fi
 
 if [ ${#SEARCH_MODES[@]} -eq 0 ]; then
   echo "SEARCH_MODES=none"
   echo "⚠ No search backend available."
+  echo "  To enable: start embed-server OR ensure kb CLI is configured"
+  echo "  Note: Central KB search works WITHOUT Ollama or embed-server"
 else
   echo "SEARCH_MODES=${SEARCH_MODES[*]}"
 fi
@@ -121,9 +130,11 @@ When client-side embeddings are needed (vector DB search), sources are tried in 
 
 | Priority | Source | Speed | How |
 |-----------|--------|-------|-----|
-| 1 | embed-server (local socket) | ~40ms | `/tmp/embed-server.sock`, uses `sentence-transformers` |
-| 2 | embed-server (Central KB sidecar, HTTP) | ~100ms | `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
+| 1 | **embed-server (local socket)** | ~40ms | `/tmp/embed-server.sock`, uses `sentence-transformers` |
+| 2 | **embed-server (Central KB sidecar, HTTP)** | ~100ms | `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
 | 3 | Ollama (fallback) | ~330ms | `localhost:11434/api/embeddings`, model `bge-large:latest` |
+
+**In this project:** The entrypoint (`entrypoint-wrapper.sh`) starts `embed-server.py` automatically, which loads the embedding model (`tss-deposium/m2v-bge-m3-1024d`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via Unix socket at `/tmp/embed-server.sock`.
 
 If no source is available, vector DB search is unavailable. Central KB search still works.
 
@@ -201,7 +212,28 @@ costs ~0ms (cache hit).
 ## No Backends Available
 
 If pre-flight returns `SEARCH_MODES=none`:
-- Central KB search works without client-side embeddings — the server handles query vectors
-- If Central KB is also unreachable, no automated search is possible
-- Fall back to manual: `grep -r "topic" /project/knowledgebase/`
-- Or fix: start embed-server, pull Ollama model, or start Central KB server
+
+**First, check Central KB:** The `kb` CLI might not be on PATH or the server might be unreachable. Central KB search works **without client-side embeddings** — the server generates query vectors. Fix:
+```bash
+# Ensure kb CLI is installed
+which kb || echo "kb not found - install from install-kb-cli skill"
+
+# Check server health
+kb health || echo "Central KB server unreachable"
+```
+
+**For vector DB:** In this project, `embed-server.py` starts automatically via `entrypoint-wrapper.sh`. It loads the embedding model (`tss-deposium/m2v-bge-m3-1024d`) via Hugging Face — **no Ollama model download needed**.
+
+If embed-server is not running:
+```bash
+# Start embed-server (preferred, ~40ms)
+python3 /project/tooling/scripts/embed-server.py &
+
+# Verify it's running
+test -S /tmp/embed-server.sock && echo "✓ embed-server socket ready"
+```
+
+**Manual fallback:** If both backends are unavailable:
+```bash
+grep -r "topic" /project/knowledgebase/
+```

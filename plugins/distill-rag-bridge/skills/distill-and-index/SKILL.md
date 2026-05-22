@@ -23,7 +23,7 @@ This skill detects which indexing systems are available and uses **all that are 
 
 ## Embedding Strategy
 
-All indexing requires 1024-dim embeddings (`bge-large-en-v1.5`). The embedding source is detected in priority order:
+All indexing requires 1024-dim embeddings. The embedding source is detected in priority order:
 
 | Priority | Source | Speed | How |
 |-----------|--------|-------|-----|
@@ -31,8 +31,10 @@ All indexing requires 1024-dim embeddings (`bge-large-en-v1.5`). The embedding s
 | 2 | **embed-server** (Central KB sidecar, HTTP) | ~100ms | HTTP at `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
 | 3 | **Ollama** (fallback) | ~330ms | HTTP at `localhost:11434/api/embeddings`, model `bge-large:latest` |
 
+**In this project:** The entrypoint (`entrypoint-wrapper.sh`) starts `embed-server.py` automatically, which loads the embedding model (`tss-deposium/m2v-bge-m3-1024d`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via Unix socket at `/tmp/embed-server.sock`.
+
 - `load-kb-to-memory.py` and `search-kb-memory.py` try embed-server socket → Ollama
-- `kb submit` uses Ollama (the Central KB server uses its own embed-server sidecar for search-time queries)
+- `kb submit` uses client-side embeddings (embed-server preferred, no Ollama pull needed)
 - **Never mix embedding dimensions** — all entries must be 1024-dim
 
 ## Platform Behavior
@@ -107,18 +109,11 @@ fi
 ```
 
 - If `vectordb`: run `load-kb-to-memory.py` — embeds entries and stores in local SQLite
-- If `central-kb`: run `kb submit` — pushes entries to shared Central KB server (auto-embeds with bge-large 1024-dim)
+- If `central-kb`: run `kb submit` — pushes entries to shared Central KB server (embeddings via embed-server)
 - Both can be active simultaneously — they serve different search needs
-- If `none`: skip Phase 2. Files are written to `knowledgebase/` and will be indexed on the next successful run. To fix:
-  ```bash
-  # Option 1: Start the embed-server daemon (fastest, ~40ms)
-  python3 /project/tooling/scripts/embed-server.py &
+- If `none`: skip Phase 2. Files are written to `knowledgebase/` and will be indexed on the next successful run.
 
-  # Option 2: Start Ollama + pull model (works everywhere, ~330ms)
-  ollama serve &
-  ollama pull bge-large:latest
-  ```
-  Note: `kb search`, `kb explain`, and `kb pull` still work in Phase 3 even without a local embedding source — the Central KB server generates query vectors server-side. Only `kb submit` and local vector DB need client-side embeddings.
+**In this project:** `embed-server.py` starts automatically via `entrypoint-wrapper.sh`, so vector DB indexing is always available. No Ollama model download needed.
 
 ## Architecture
 
@@ -155,8 +150,8 @@ Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
 ## Prerequisites
 
 - `session-distillation` skill installed
-- **For vector DB:** embed-server running (`/tmp/embed-server.sock`) OR Ollama running with `bge-large:latest` pulled — embed-server is ~8× faster and preferred
-- **For Central KB:** `kb` CLI installed (`kb` skill) + server reachable + Ollama with `bge-large:latest` for embedding generation
+- **For vector DB:** embed-server running (`/tmp/embed-server.sock`) — **auto-started by `entrypoint-wrapper.sh` in this project**, no Ollama model needed
+- **For Central KB:** `kb` CLI installed (`kb` skill) + server reachable — embeddings handled by embed-server
 - Scripts at `/project/scripts/{load-kb-to-memory,search-kb-memory}.py` (only needed for vector DB)
 - (Pi only) `pi-hermes-memory` extension installed — manages all memory file writing
 
@@ -210,7 +205,7 @@ python3 /project/scripts/load-kb-to-memory.py
 
 This reads all `knowledgebase/{decisions,patterns,sessions}/*.yaml` files, generates 1024-dim embeddings (embed-server socket preferred, Ollama fallback), and stores them in `/project/.agent/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
 
-**Do not proceed** if no embedding source is available. Knowledgebase files are already written — they will be indexed on the next successful run.
+**In this project:** `embed-server.py` is auto-started by `entrypoint-wrapper.sh`, so embeddings are always available. **No Ollama model download needed**.
 
 Verify after indexing:
 
@@ -232,13 +227,15 @@ kb submit --project $CENTRAL_KB_PROJECT
 ```
 
 The `kb` CLI:
-- Auto-generates 1024-dim embeddings via Ollama `bge-large:latest`
+- Auto-generates 1024-dim embeddings via embed-server (this project) or Ollama fallback
 - Pre-computes simhash to avoid server-side OverflowError (unsigned int64 → signed int64 conversion)
 - Submits in batches of 5
 - Reports accepted/duplicate/conflicted/error for each entry
 - Server URL is auto-detected (host.containers.internal:9000) or from `CENTRAL_KB_URL` env var
 
 **Prerequisites:** `CENTRAL_KB_PROJECT` env var must be set. If not set, Central KB indexing is skipped with a warning.
+
+**Note:** In this project, embed-server provides embeddings — no Ollama model download needed.
 
 Verify after submitting:
 
