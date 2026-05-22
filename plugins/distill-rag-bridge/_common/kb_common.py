@@ -5,10 +5,14 @@ Provides embedding with content-addressable caching (SHA-256 → SQLite),
 plus vector packing/unpacking and cosine similarity.
 
 Used by: load-kb-to-memory.py, search-kb-memory.py
+
+Embedding fallback chain (all use bge-large, 1024-dim):
+  1. Central KB embed-server HTTP sidecar (~100ms)
+  2. Ollama bge-large:latest (~330ms, auto-pulls if needed)
 """
 import hashlib
 import json
-import socket
+import os
 import sqlite3
 import struct
 import sys
@@ -17,7 +21,7 @@ from pathlib import Path
 
 DB_PATH = Path("/project/.agent/agentdb.sqlite3")
 EMBED_CACHE_DB = Path("/project/.agent/embed_cache.sqlite3")
-EMBED_SOCK = "/tmp/embed-server.sock"
+EMBED_MODEL = "bge-large:latest"  # Must match BAAI/bge-large-en-v1.5 (1024-dim)
 
 # Auto-create .agent/ directory on import so first-run never fails
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -45,29 +49,6 @@ def _detect_embed_http_url() -> str | None:
     return None
 
 
-def embed_fast(text: str) -> list[float] | None:
-    """Try the local embed daemon (Unix socket) — ~40ms."""
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        sock.connect(EMBED_SOCK)
-        sock.sendall(text[:512].encode("utf-8"))
-        sock.shutdown(socket.SHUT_WR)
-        chunks = []
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        sock.close()
-        result = json.loads(b"".join(chunks))
-        if "error" in result:
-            return None
-        return result["embedding"]
-    except Exception:
-        return None
-
-
 def embed_http(text: str) -> list[float] | None:
     """Try the Central KB embed-server HTTP sidecar — ~100ms."""
     url = _detect_embed_http_url()
@@ -90,18 +71,43 @@ def embed_http(text: str) -> list[float] | None:
         return None
 
 
+def embed_ollama(text: str) -> list[float] | None:
+    """Try Ollama embedding API — ~330ms, auto-pulls model if needed."""
+    model = os.environ.get("KB_EMBED_MODEL", EMBED_MODEL)
+    payload = json.dumps({"model": model, "prompt": text[:512]}).encode("utf-8")
+    req = urllib.request.Request(
+        "http://localhost:11434/api/embeddings",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=120)
+        result = json.loads(resp.read())
+        vec = result.get("embedding")
+        if vec and len(vec) == 1024:
+            return vec
+        return None
+    except Exception:
+        return None
+
+
 def embed(text: str) -> list[float]:
-    """Generate embedding — tries local socket then HTTP sidecar."""
-    emb = embed_fast(text)
-    if emb is not None:
-        return emb
+    """Generate 1024-dim embedding — tries HTTP sidecar, then Ollama.
+
+    Both sources use BAAI/bge-large-en-v1.5 (1024-dim) so vectors are
+    compatible across local and central KB indexes.
+    """
     emb = embed_http(text)
     if emb is not None:
         return emb
+    emb = embed_ollama(text)
+    if emb is not None:
+        return emb
     print("ERROR: No embedding source available.", file=sys.stderr)
-    print("  Tried: 1) embed-server socket (/tmp/embed-server.sock)", file=sys.stderr)
-    print("         2) embed-server HTTP (host.containers.internal:9001)", file=sys.stderr)
-    print("  Fix: start embed-server: python3 /project/tooling/scripts/embed-server.py", file=sys.stderr)
+    print("  Tried: 1) embed-server HTTP (host.containers.internal:9001)", file=sys.stderr)
+    print(f"         2) Ollama (localhost:11434, model={EMBED_MODEL})", file=sys.stderr)
+    print("  Fix: start central-kb embed-server OR pull: ollama pull bge-large:latest", file=sys.stderr)
     sys.exit(1)
 
 
