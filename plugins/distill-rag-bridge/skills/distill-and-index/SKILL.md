@@ -1,12 +1,12 @@
 ---
 name: distill-and-index
-description: Distill conversation insights into durable knowledgebase files, then index them for search (vector DB and Central KB).
+description: Distill conversation insights into durable knowledgebase files (OKF v0.1), then index them for search (vector DB and Central KB).
 allowed-tools: Bash Read Write Edit
 ---
 
 # Distill & Index
 
-Extract high-value information from a conversation and persist it so future sessions pick up where this one left off. Knowledgebase files are indexed for search using the best available method.
+Extract high-value information from a conversation and persist it so future sessions pick up where this one left off. Knowledgebase files use the **Open Knowledge Format (OKF) v0.1** — markdown files with YAML frontmatter. Legacy YAML entries are auto-detected and converted.
 
 ## Two-Tier Indexing
 
@@ -27,22 +27,21 @@ All indexing requires 1024-dim embeddings. The embedding source is detected in p
 
 | Priority | Source | Speed | How |
 |-----------|--------|-------|-----|
-| 1 | **embed-server** (local socket daemon) | ~40ms | Unix socket at `/tmp/embed-server.sock`, uses `sentence-transformers` |
-| 2 | **embed-server** (Central KB sidecar, HTTP) | ~100ms | HTTP at `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
-| 3 | **Ollama** (fallback) | ~330ms | HTTP at `localhost:11434/api/embeddings`, model `bge-large:latest` |
+| 1 | **embed-server** (Central KB sidecar, HTTP) | ~100ms | HTTP at `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
+| 2 | **Ollama** (fallback) | ~330ms | HTTP at `localhost:11434/api/embeddings`, model `bge-large:latest` |
 
-**In this project:** The entrypoint (`entrypoint-wrapper.sh`) starts `embed-server.py` automatically, which loads the embedding model (`tss-deposium/m2v-bge-m3-1024d`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via Unix socket at `/tmp/embed-server.sock`.
+**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, which loads the embedding model (`BAAI/bge-large-en-v1.5`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via HTTP at `host.containers.internal:9001`.
 
-- `load-kb-to-memory.py` and `search-kb-memory.py` try embed-server socket → Ollama
-- `kb submit` uses client-side embeddings (embed-server preferred, no Ollama pull needed)
+- `load-kb-to-memory.py` and `search-kb-memory.py` use `kb_common.py` which tries embed-server HTTP (port 9001) → Ollama fallback
+- `kb submit` uses client-side embeddings from the same pipeline
 - **Never mix embedding dimensions** — all entries must be 1024-dim
 
 ## Platform Behavior
 
 | Platform | Memory files | Knowledgebase files | Index |
 |----------|-------------|---------------------|-------|
-| **Pi** | ❌ Skipped — handled by `pi-hermes-memory` | ✅ decisions, patterns, sessions | ✅ vector DB, Central KB |
-| **Claude Code** | ✅ `~/.claude/projects/*/memory/` | ✅ decisions, patterns, sessions | ✅ vector DB, Central KB |
+| **Pi** | ❌ Skipped — handled by `pi-hermes-memory` | ✅ decisions, patterns, sessions (OKF `.md`) | ✅ vector DB, Central KB |
+| **Claude Code** | ✅ `~/.claude/projects/*/memory/` | ✅ decisions, patterns, sessions (OKF `.md`) | ✅ vector DB, Central KB |
 
 **On Pi**, do NOT write memory entries (`MEMORY.md`, `USER.md`, etc.). The `pi-hermes-memory` extension already manages all memory — writing duplicate entries causes conflicts. Focus exclusively on knowledgebase distillation and indexing.
 
@@ -55,20 +54,49 @@ All indexing requires 1024-dim embeddings. The embedding source is detected in p
 - Before context compaction
 - The user explicitly asks to save insights for future sessions
 
-## Pre-flight: Detect Index Mode
+## Pre-flight: Detect & Convert Format
 
-Before Phase 2, determine which indexing methods are available:
+Before Phase 1, detect whether the existing knowledgebase uses legacy YAML format and convert it to OKF:
+
+```bash
+KB_DIR="/project/knowledgebase"
+HAS_LEGACY=false
+
+# Check for legacy YAML files
+if ls "$KB_DIR"/decisions/*.yaml "$KB_DIR"/patterns/*.yaml "$KB_DIR"/sessions/*.yaml 2>/dev/null; then
+  HAS_LEGACY=true
+  echo "⚠ Legacy YAML files detected. Converting to OKF..."
+  python3 /project/scripts/migrate-to-okf.py \
+    --input-dir "$KB_DIR" \
+    --output-dir "$KB_DIR"
+  echo "✅ Conversion complete. Legacy YAML files remain in place; OKF .md files created alongside."
+fi
+
+# Verify OKF format
+if [ "$HAS_LEGACY" = true ] || ls "$KB_DIR"/decisions/*.md "$KB_DIR"/patterns/*.md "$KB_DIR"/sessions/*.md 2>/dev/null; then
+  python3 -c "
+import sys
+sys.path.insert(0, '/project/tooling/central-kb')
+from app.okf import validate_okf_bundle
+errors = validate_okf_bundle('$KB_DIR')
+if errors:
+    for e in errors:
+        print(f'  ✗ {e}')
+    sys.exit(1)
+else:
+    print('✅ Knowledgebase is OKF conformant')
+" 2>/dev/null || echo "⚠ OKF validation unavailable (app.okf module not importable)"
+fi
+```
+
+Then detect which indexing modes are available:
 
 ```bash
 INDEX_MODES=[]
 
-# Check for vector DB — embed-server (socket or HTTP) or Ollama
+# Check for vector DB — embed-server (HTTP) or Ollama
 HAS_EMBED=false
-if [ -S /tmp/embed-server.sock ]; then
-  HAS_EMBED=true
-  INDEX_MODES+=("vectordb")
-  echo "Embedding: embed-server socket (~40ms)"
-elif curl -sf http://host.containers.internal:9001/health 2>/dev/null | python3 -c "
+if curl -sf http://host.containers.internal:9001/health 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 sys.exit(0 if d.get('model_ready') else 1)" 2>/dev/null; then
@@ -86,40 +114,36 @@ sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
 fi
 
 # Check for Central KB (shared index)
-# - kb search/pull: only needs server healthy (query vectors generated server-side)
-# - kb submit: also needs client-side embedding source (vectors generated before sending)
 if command -v kb &>/dev/null && kb health &>/dev/null; then
   if [ "$HAS_EMBED" = true ]; then
     INDEX_MODES+=("central-kb")
   else
     echo "⚠ Central KB: server reachable for search/pull, but no client-side embedding source — submit skipped"
-    echo "  kb submit needs client-side embeddings. Fix: start embed-server or ollama pull bge-large:latest"
-    echo "  kb search and kb pull still work (server generates query vectors)"
   fi
 fi
 
 if [ ${#INDEX_MODES[@]} -eq 0 ]; then
   echo "INDEX_MODE=none"
   echo "⚠ No indexer available. Run Phase 1 (distill) only."
-  echo "  To enable indexing: start embed-server, or pull Ollama model:"
-  echo "    ollama pull bge-large:latest"
 else
   echo "INDEX_MODES=${INDEX_MODES[*]}"
 fi
 ```
 
 - If `vectordb`: run `load-kb-to-memory.py` — embeds entries and stores in local SQLite
-- If `central-kb`: run `kb submit` — pushes entries to shared Central KB server (embeddings via embed-server)
-- Both can be active simultaneously — they serve different search needs
+- If `central-kb`: run `kb submit` — pushes entries to shared Central KB server
+- Both can be active simultaneously
 - If `none`: skip Phase 2. Files are written to `knowledgebase/` and will be indexed on the next successful run.
-
-**In this project:** `embed-server.py` starts automatically via `entrypoint-wrapper.sh`, so vector DB indexing is always available. No Ollama model download needed.
 
 ## Architecture
 
 ```
-Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
-                     │                        │
+Conversation ──► Pre-flight ──► knowledgebase/*.yaml (legacy)
+                     │               │
+                     │          auto-convert
+                     │               ▼
+                     │     knowledgebase/*.md (OKF)
+                     │               │
                      │  (Pi: skip memory)     ▼
                      │              Phase 2 (Index) — all available run in parallel
                      │             ┌─────────────────────┐
@@ -150,24 +174,74 @@ Conversation ──► Phase 1 (Distill) ──► knowledgebase/*.yaml
 ## Prerequisites
 
 - `session-distillation` skill installed
-- **For vector DB:** embed-server running (`/tmp/embed-server.sock`) — **auto-started by `entrypoint-wrapper.sh` in this project**, no Ollama model needed
+- **For vector DB:** embed-server running at `host.containers.internal:9001` — **auto-started by Docker Compose via `entrypoint-wrapper.sh` in this project**, no Ollama model needed
 - **For Central KB:** `kb` CLI installed (`kb` skill) + server reachable — embeddings handled by embed-server
-- Scripts at `/project/scripts/{load-kb-to-memory,search-kb-memory}.py` (only needed for vector DB)
+- Scripts at `/project/tooling/scripts/{load-kb-to-memory,search-kb-memory}.py` (only needed for vector DB)
+- Migration script at `/project/scripts/migrate-to-okf.py` (for legacy YAML → OKF conversion)
 - (Pi only) `pi-hermes-memory` extension installed — manages all memory file writing
 
 ## Phase 1 — Distill (always runs)
+
+### OKF Format Reference
+
+Each knowledgebase entry is an **OKF v0.1 markdown file** with YAML frontmatter:
+
+```markdown
+---
+type: Decision
+title: Adopt OKF v0.1 for Central Knowledge Base
+description: Migrated Central KB from proprietary YAML format to OKF v0.1
+tags: [okf, central-kb, knowledge-management]
+timestamp: 2026-06-21T00:00:00Z
+---
+
+# Context
+We needed a standardized format for knowledge entries.
+
+# Decision
+Adopt OKF v0.1 with backward compatibility.
+
+# Consequences
+All new entries use OKF markdown format.
+```
+
+**Required frontmatter fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Entry type: `Decision`, `Pattern`, `Session`, `Concept`, `Reference`, etc. |
+| `title` | string | Human-readable title |
+
+**Recommended frontmatter fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `description` | string | One-line summary |
+| `tags` | list | Categorization tags |
+| `timestamp` | string | ISO 8601 datetime (`2026-06-21T00:00:00Z`) |
+| `resource` | string | URL or path to source |
+
+**Body:** Markdown content after the closing `---`. Use `# Section` headers for structure.
+
+**Type-to-namespace mapping:**
+| OKF Type | Directory |
+|----------|-----------|
+| `Decision` | `decisions/` |
+| `Pattern` | `patterns/` |
+| `Session` | `sessions/` |
+| `Concept` | `concepts/` |
+| `Reference` | `references/` |
+| *(unknown)* | lowercased type |
 
 ### On Pi
 
 Run the session-distillation workflow for **knowledgebase files only** (skip memory):
 
 1. **Scan** the conversation for decisions, gotchas, architecture realities, user preferences, bug root causes, integration details, troubleshooting procedures, and operational risks
-2. **Check existing entries** — read `knowledgebase/index.yaml` before writing
-3. **Write knowledge base entries** — YAML files for decisions, patterns, and sessions:
-   - `knowledgebase/decisions/*.yaml` — architecture decisions with rationale and alternatives
-   - `knowledgebase/patterns/*.yaml` — implementation patterns, troubleshooting procedures
-   - `knowledgebase/sessions/*.yaml` — session summaries (what was done, what changed)
-4. **Update index file** — `knowledgebase/index.yaml`
+2. **Check existing entries** — read `knowledgebase/index.md` before writing
+3. **Write knowledge base entries** — OKF markdown files for decisions, patterns, and sessions:
+   - `knowledgebase/decisions/*.md` — architecture decisions with rationale and alternatives
+   - `knowledgebase/patterns/*.md` — implementation patterns, troubleshooting procedures
+   - `knowledgebase/sessions/*.md` — session summaries (what was done, what changed)
+4. **Update index file** — `knowledgebase/index.md` (OKF bundle index with `okf_version: "0.1"`)
 5. **Verify** — no duplicates, no stale entries, index counts accurate
 
 **Do NOT write memory files.** Pi's `pi-hermes-memory` extension handles `MEMORY.md`, `USER.md`, and failure tracking automatically. Writing memory here creates duplicate/conflicting entries.
@@ -177,7 +251,7 @@ Run the session-distillation workflow for **knowledgebase files only** (skip mem
 Run the full session-distillation workflow including both memory and knowledgebase:
 
 1. **Scan** the conversation (same as Pi)
-2. **Check existing entries** — read `~/.claude/projects/*/memory/MEMORY.md` and `knowledgebase/index.yaml` before writing
+2. **Check existing entries** — read `~/.claude/projects/*/memory/MEMORY.md` and `knowledgebase/index.md` before writing
 3. **Write memory entries** — markdown files with YAML frontmatter:
    ```markdown
    ---
@@ -187,8 +261,8 @@ Run the full session-distillation workflow including both memory and knowledgeba
    ---
    Content...
    ```
-4. **Write knowledge base entries** — same as Pi above
-5. **Update index files** — `MEMORY.md` and `index.yaml`
+4. **Write knowledge base entries** — same as Pi above (OKF `.md` format)
+5. **Update index files** — `MEMORY.md` and `knowledgebase/index.md`
 6. **Verify** — no duplicates, no stale entries, index counts accurate
 
 ## Phase 2 — Index
@@ -197,15 +271,15 @@ All detected indexers run. Vector DB (local) and Central KB (shared) are indepen
 
 ### Vector DB (local)
 
-If an embedding source is available (embed-server socket or Ollama), build the vector index:
+If an embedding source is available (embed-server HTTP sidecar or Ollama), build the vector index:
 
 ```bash
-python3 /project/scripts/load-kb-to-memory.py
+python3 /project/tooling/scripts/load-kb-to-memory.py
 ```
 
-This reads all `knowledgebase/{decisions,patterns,sessions}/*.yaml` files, generates 1024-dim embeddings (embed-server socket preferred, Ollama fallback), and stores them in `/project/.agent/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
+This reads all `knowledgebase/{decisions,patterns,sessions}/*.md` and `*.yaml` files, generates 1024-dim embeddings (embed-server HTTP sidecar preferred, Ollama fallback), and stores them in `/project/.agent/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
 
-**In this project:** `embed-server.py` is auto-started by `entrypoint-wrapper.sh`, so embeddings are always available. **No Ollama model download needed**.
+**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, serving embeddings via HTTP at `host.containers.internal:9001`. **No Ollama model download needed**.
 
 Verify after indexing:
 
@@ -235,7 +309,7 @@ The `kb` CLI:
 
 **Prerequisites:** `CENTRAL_KB_PROJECT` env var must be set. If not set, Central KB indexing is skipped with a warning.
 
-**Note:** In this project, embed-server provides embeddings — no Ollama model download needed.
+**Note:** In this project, Docker Compose via `entrypoint-wrapper.sh` starts embed-server automatically — no Ollama model download needed. The `load-kb-to-memory.py` and `search-kb-memory.py` scripts use the HTTP-based `kb_common.py` embedding pipeline.
 
 Verify after submitting:
 
@@ -261,12 +335,13 @@ See the `search-kb` skill for full details, pre-flight detection, and agent patt
 
 | Question | Command |
 |----------|--------|
-| Local search (all namespaces) | `python3 /project/scripts/search-kb-memory.py "<query>"` |
-| Local search (decisions only) | `python3 /project/scripts/search-kb-memory.py "<query>" -n decisions` |
+| Local search (all namespaces) | `python3 /project/tooling/scripts/search-kb-memory.py "<query>"` |
+| Local search (decisions only) | `python3 /project/tooling/scripts/search-kb-memory.py "<query>" -n decisions` |
 | Shared search | `kb search "<query>" --scope <project>` |
 | Structured explain | `kb explain "<query>" --scope <project>` |
 | Pull new entries from other projects | `kb pull --project <project>` |
 | Check for concept drift | `kb drift --project <project>` |
+| Validate OKF bundle | `python3 -c "import sys; sys.path.insert(0,'/project/tooling/central-kb'); from app.okf import validate_okf_bundle; errors=validate_okf_bundle('/project/knowledgebase'); print(errors or '✅ OKF conformant')"` |
 
 ## How Agents Use This
 
@@ -278,7 +353,8 @@ Agents treat the distill-and-index pipeline as a two-way memory system:
 ```
 Agent completes work
   → distill-and-index runs (manual or PreCompact hook)
-    → Phase 1: session-distillation scans conversation, writes KB files only
+    → Pre-flight: detect legacy YAML, auto-convert to OKF
+    → Phase 1: session-distillation scans conversation, writes OKF .md files only
                (memory is skipped — pi-hermes-memory handles that independently)
     → Phase 2a: load-kb-to-memory.py indexes entries into local vector DB
     → Phase 2b: kb submit pushes entries to Central KB (cross-project sharing)
@@ -341,8 +417,8 @@ For automatic distillation before context compaction, add to `.pi/settings.local
       "matcher": "auto",
       "hooks": [{
         "type": "agent",
-        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into knowledgebase files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run python3 /project/scripts/load-kb-to-memory.py to index KB files into the vector database, then kb submit --project $CENTRAL_KB_PROJECT to push entries to Central KB (if kb CLI available). Verify entry counts and kb submit results.",
-        "statusMessage": "Distilling session, indexing into vector DB, and syncing to Central KB..."
+        "prompt": "Run the distill-and-index skill. Pre-flight: detect legacy YAML files in knowledgebase/ and convert to OKF via python3 /project/scripts/migrate-to-okf.py. Phase 1: distill conversation into OKF markdown files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run python3 /project/tooling/scripts/load-kb-to-memory.py to index KB files into the vector database, then kb submit --project $CENTRAL_KB_PROJECT to push entries to Central KB (if kb CLI available). Verify entry counts and kb submit results.",
+        "statusMessage": "Distilling session, converting legacy YAML, indexing into vector DB, and syncing to Central KB..."
       }]
     }]
   }
@@ -358,8 +434,8 @@ For automatic distillation before context compaction, add to `.pi/settings.local
       "matcher": "auto",
       "hooks": [{
         "type": "agent",
-        "prompt": "Run the distill-and-index skill. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run python3 /project/scripts/load-kb-to-memory.py to index KB files into the vector database, then kb submit --project $CENTRAL_KB_PROJECT to push entries to Central KB (if kb CLI available). Verify entry counts and kb submit results.",
-        "statusMessage": "Distilling session, indexing into vector DB, and syncing to Central KB..."
+        "prompt": "Run the distill-and-index skill. Pre-flight: detect legacy YAML files in knowledgebase/ and convert to OKF via python3 /project/scripts/migrate-to-okf.py. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run python3 /project/tooling/scripts/load-kb-to-memory.py to index KB files into the vector database, then kb submit --project $CENTRAL_KB_PROJECT to push entries to Central KB (if kb CLI available). Verify entry counts and kb submit results.",
+        "statusMessage": "Distilling session, converting legacy YAML, indexing into vector DB, and syncing to Central KB..."
       }]
     }]
   }
@@ -371,17 +447,17 @@ For automatic distillation before context compaction, add to `.pi/settings.local
 After running, confirm:
 
 **All modes (Pi):**
-1. **KB entries created** — `cat knowledgebase/index.yaml`
+1. **KB entries created** — `cat knowledgebase/index.md`
 2. **Memory untouched** — hermes-memory manages memory files independently
 
 **All modes (Claude Code):**
 1. **Memory files written** — `ls ~/.claude/projects/*/memory/`
 2. **MEMORY.md updated** — `cat ~/.claude/projects/*/memory/MEMORY.md`
-3. **KB entries created** — `cat knowledgebase/index.yaml`
+3. **KB entries created** — `cat knowledgebase/index.md`
 
 **Vector DB (if available):**
 1. **Vector index populated** — `python3 -c "import sqlite3; db=sqlite3.connect('/project/.agent/agentdb.sqlite3'); print(db.execute('SELECT COUNT(*) FROM embeddings').fetchone()[0], 'entries')"`
-2. **Search works** — `python3 /project/scripts/search-kb-memory.py "test" -l 3`
+2. **Search works** — `python3 /project/tooling/scripts/search-kb-memory.py "test" -l 3`
 
 **Central KB (if available):**
 1. **Server healthy** — `kb health`

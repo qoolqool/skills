@@ -3,6 +3,7 @@
 
 Supports context-aware re-ranking via --context flag.
 Context can be inline text or @filepath (reads file contents).
+Handles both OKF (.md) and legacy (.yaml) knowledgebase entries.
 """
 import json
 import re
@@ -74,6 +75,19 @@ def term_boost(terms: set[str], content: str) -> float:
     return min(1.0, matched / 3) * 0.1
 
 
+# --- OKF metadata extraction ---
+
+
+def extract_okf_metadata(meta: dict) -> dict:
+    """Extract OKF-specific metadata from the stored metadata dict."""
+    return {
+        "type": meta.get("type") or meta.get("okf_type", ""),
+        "tags": meta.get("tags", []),
+        "description": meta.get("description", ""),
+        "timestamp": meta.get("timestamp", ""),
+    }
+
+
 # --- Main search logic ---
 
 
@@ -124,8 +138,16 @@ def search(query: str, namespace: str | None = None, limit: int = 5,
 
     for i, (score, key, ns, content, meta) in enumerate(scored[:limit]):
         title = meta.get("title", key)
-        print(f"  {i + 1}. [{ns}] {title}  (score: {score:.4f})")
-        print(f"     {content[:120]}...")
+        okf_meta = extract_okf_metadata(meta)
+        okf_type = okf_meta.get("type") or ns
+        okf_tags = okf_meta.get("tags", [])
+        tag_str = f" [{', '.join(okf_tags[:3])}]" if okf_tags else ""
+
+        print(f"  {i + 1}. [{okf_type}]{tag_str} {title}  (score: {score:.4f})")
+        if okf_meta.get("description"):
+            print(f"     {okf_meta['description'][:120]}")
+        else:
+            print(f"     {content[:120]}...")
         print()
 
     db.close()
