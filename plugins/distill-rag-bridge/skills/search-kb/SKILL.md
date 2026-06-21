@@ -30,10 +30,7 @@ SEARCH_MODES=()
 
 # Check for local vector DB (needs client-side embeddings)
 HAS_EMBED=false
-if [ -S /tmp/embed-server.sock ]; then
-  HAS_EMBED=true
-  echo "✓ Embeddings: embed-server socket (~40ms)"
-elif curl -sf http://host.containers.internal:9001/health 2>/dev/null | python3 -c "
+if curl -sf http://host.containers.internal:9001/health 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 sys.exit(0 if d.get('model_ready') else 1)" 2>/dev/null; then
@@ -77,17 +74,17 @@ Always search **all available backends**. Do not skip one just because the other
 
 ```bash
 # Basic search (unchanged)
-python3 /project/scripts/search-kb-memory.py "<query>" [-n namespace] [-l limit]
+python3 /project/tooling/scripts/search-kb-memory.py "<query>" [-n namespace] [-l limit]
 
 # Context-aware search — pass code snippet, error message, or file contents
 # to re-rank results toward the current work context
-python3 /project/scripts/search-kb-memory.py "<query>" --context "<inline text>"
-python3 /project/scripts/search-kb-memory.py "<query>" --context @<filepath>
+python3 /project/tooling/scripts/search-kb-memory.py "<query>" --context "<inline text>"
+python3 /project/tooling/scripts/search-kb-memory.py "<query>" --context @<filepath>
 
 # Examples:
-python3 /project/scripts/search-kb-memory.py "port" --context "$(cat docker-compose.yml)"
-python3 /project/scripts/search-kb-memory.py "connection refused" --context @error.log
-python3 /project/scripts/search-kb-memory.py "model" --context "$(cat tooling/scripts/kb_common.py)"
+python3 /project/tooling/scripts/search-kb-memory.py "port" --context "$(cat docker-compose.yml)"
+python3 /project/tooling/scripts/search-kb-memory.py "connection refused" --context @error.log
+python3 /project/tooling/scripts/search-kb-memory.py "model" --context "$(cat tooling/scripts/kb_common.py)"
 ```
 
 | Namespace | Content | Use When |
@@ -130,11 +127,10 @@ When client-side embeddings are needed (vector DB search), sources are tried in 
 
 | Priority | Source | Speed | How |
 |-----------|--------|-------|-----|
-| 1 | **embed-server (local socket)** | ~40ms | `/tmp/embed-server.sock`, uses `sentence-transformers` |
-| 2 | **embed-server (Central KB sidecar, HTTP)** | ~100ms | `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
-| 3 | Ollama (fallback) | ~330ms | `localhost:11434/api/embeddings`, model `bge-large:latest` |
+| 1 | **embed-server** (Central KB sidecar, HTTP) | ~100ms | `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
+| 2 | Ollama (fallback) | ~330ms | `localhost:11434/api/embeddings`, model `bge-large:latest` |
 
-**In this project:** The entrypoint (`entrypoint-wrapper.sh`) starts `embed-server.py` automatically, which loads the embedding model (`tss-deposium/m2v-bge-m3-1024d`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via Unix socket at `/tmp/embed-server.sock`.
+**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, which loads the embedding model (`BAAI/bge-large-en-v1.5`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via HTTP at `host.containers.internal:9001`.
 
 If no source is available, vector DB search is unavailable. Central KB search still works.
 
@@ -164,13 +160,13 @@ When you pass `--context`, the search uses two mechanisms to re-rank results:
 
 ```bash
 # Debugging — pass the error message
-python3 /project/scripts/search-kb-memory.py "timeout" --context @/tmp/last-error.log
+python3 /project/tooling/scripts/search-kb-memory.py "timeout" --context @/tmp/last-error.log
 
 # Architecture — pass the file you're working on
-python3 /project/scripts/search-kb-memory.py "port" --context @docker-compose.yml
+python3 /project/tooling/scripts/search-kb-memory.py "port" --context @docker-compose.yml
 
 # Reading code — pass the code snippet
-python3 /project/scripts/search-kb-memory.py "embedding" --context "$(cat tooling/scripts/kb_common.py | head -30)"
+python3 /project/tooling/scripts/search-kb-memory.py "embedding" --context "$(cat tooling/scripts/kb_common.py | head -30)"
 ```
 
 Context is cached via SHA-256 content hash — passing the same context repeatedly
@@ -222,15 +218,12 @@ which kb || echo "kb not found - install from install-kb-cli skill"
 kb health || echo "Central KB server unreachable"
 ```
 
-**For vector DB:** In this project, `embed-server.py` starts automatically via `entrypoint-wrapper.sh`. It loads the embedding model (`tss-deposium/m2v-bge-m3-1024d`) via Hugging Face — **no Ollama model download needed**.
+**For vector DB:** In this project, Docker Compose via `entrypoint-wrapper.sh` starts embed-server automatically. It loads the embedding model (`BAAI/bge-large-en-v1.5`) via Hugging Face — **no Ollama model download needed**.
 
 If embed-server is not running:
 ```bash
-# Start embed-server (preferred, ~40ms)
-python3 /project/tooling/scripts/embed-server.py &
-
-# Verify it's running
-test -S /tmp/embed-server.sock && echo "✓ embed-server socket ready"
+# Check embed-server status
+curl -sf http://host.containers.internal:9001/health && echo "✓ embed-server HTTP ready"
 ```
 
 **Manual fallback:** If both backends are unavailable:
