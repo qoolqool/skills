@@ -1,14 +1,16 @@
 ---
 name: distill-and-index
-description: Distill conversation insights into durable knowledgebase files (OKF v0.1), then index them for search (vector DB and Central KB).
+description: Distill conversation insights into durable knowledgebase files (OKF v0.2). Indexing (vector DB / Central KB) is DISABLED by default pending redesign — opt in via DISTILL_INDEX_ENABLED=1.
 allowed-tools: Bash Read Write Edit
 ---
 
 # Distill & Index
 
-Extract high-value information from a conversation and persist it so future sessions pick up where this one left off. Knowledgebase files use the **Open Knowledge Format (OKF) v0.1** — markdown files with YAML frontmatter. Legacy YAML entries are auto-detected and converted.
+Extract high-value information from a conversation and persist it so future sessions pick up where this one left off. Knowledgebase files use the **Open Knowledge Format (OKF) v0.2** — markdown files with YAML frontmatter. Legacy YAML entries and OKF v0.1 entries are auto-detected and migrated.
 
-## Two-Tier Indexing
+> **⚠ Indexing is DISABLED by default.** Phase 2 (Index) is being redesigned and does NOT run unless you explicitly opt in by setting `DISTILL_INDEX_ENABLED=1`. By default only **Phase 1 (Distill)** runs — it writes OKF v0.2 knowledgebase files. The sections below describing vector DB / Central KB indexing are retained for reference during the redesign; they are gated behind the flag and skipped unless enabled.
+
+## Two-Tier Indexing (DISABLED by default — redesign pending)
 
 This skill detects which indexing systems are available and uses **all that are present**:
 
@@ -56,11 +58,12 @@ All indexing requires 1024-dim embeddings. The embedding source is detected in p
 
 ## Pre-flight: Detect & Convert Format
 
-Before Phase 1, detect whether the existing knowledgebase uses legacy YAML format and convert it to OKF:
+Before Phase 1, detect whether the existing knowledgebase uses legacy YAML or OKF v0.1 format and migrate to OKF v0.2:
 
 ```bash
 KB_DIR="/project/knowledgebase"
 HAS_LEGACY=false
+HAS_V01=false
 
 # Check for legacy YAML files
 if ls "$KB_DIR"/decisions/*.yaml "$KB_DIR"/patterns/*.yaml "$KB_DIR"/sessions/*.yaml 2>/dev/null; then
@@ -72,8 +75,18 @@ if ls "$KB_DIR"/decisions/*.yaml "$KB_DIR"/patterns/*.yaml "$KB_DIR"/sessions/*.
   echo "✅ Conversion complete. Legacy YAML files remain in place; OKF .md files created alongside."
 fi
 
-# Verify OKF format
-if [ "$HAS_LEGACY" = true ] || ls "$KB_DIR"/decisions/*.md "$KB_DIR"/patterns/*.md "$KB_DIR"/sessions/*.md 2>/dev/null; then
+# Check for OKF v0.1 files (using timestamp instead of generated, or no sources/verified/status)
+if grep -rl '^timestamp:' "$KB_DIR"/decisions/*.md "$KB_DIR"/patterns/*.md "$KB_DIR"/sessions/*.md 2>/dev/null; then
+  HAS_V01=true
+  echo "⚠ OKF v0.1 files detected (using legacy 'timestamp' field). Migrating to v0.2..."
+  python3 /project/scripts/migrate-okf-v01-to-v02.py \
+    --input-dir "$KB_DIR" \
+    --output-dir "$KB_DIR" 2>/dev/null || \
+  echo "  ⚠ Migration script not found. Manual migration needed: replace 'timestamp:' with 'generated: { by: <actor>, at: <timestamp> }' and add 'status: stable'."
+fi
+
+# Verify OKF v0.2 format
+if [ "$HAS_LEGACY" = true ] || [ "$HAS_V01" = true ] || ls "$KB_DIR"/decisions/*.md "$KB_DIR"/patterns/*.md "$KB_DIR"/sessions/*.md 2>/dev/null; then
   python3 -c "
 import sys
 sys.path.insert(0, '/project/tooling/central-kb')
@@ -84,15 +97,20 @@ if errors:
         print(f'  ✗ {e}')
     sys.exit(1)
 else:
-    print('✅ Knowledgebase is OKF conformant')
+    print('✅ Knowledgebase is OKF v0.2 conformant')
 " 2>/dev/null || echo "⚠ OKF validation unavailable (app.okf module not importable)"
 fi
 ```
 
-Then detect which indexing modes are available:
+Then, **only if `DISTILL_INDEX_ENABLED=1`**, detect which indexing modes are available:
 
 ```bash
 INDEX_MODES=[]
+if [ "${DISTILL_INDEX_ENABLED:-0}" != "1" ]; then
+  echo "INDEX_MODE=none (DISTILL_INDEX_ENABLED != 1 — indexing disabled by default)"
+  echo "⚠ Phase 2 skipped. Run Phase 1 (distill) only."
+  exit 0
+fi
 
 # Check for vector DB — embed-server (HTTP) or Ollama
 HAS_EMBED=false
@@ -142,7 +160,13 @@ Conversation ──► Pre-flight ──► knowledgebase/*.yaml (legacy)
                      │               │
                      │          auto-convert
                      │               ▼
-                     │     knowledgebase/*.md (OKF)
+                     │     knowledgebase/*.md (OKF v0.1)
+                     │               │
+                     │          migrate v0.1→v0.2
+                     │               ▼
+                     │     knowledgebase/*.md (OKF v0.2)
+                     │     with generated, verified,
+                     │     status, sources, stale_after
                      │               │
                      │  (Pi: skip memory)     ▼
                      │              Phase 2 (Index) — all available run in parallel
@@ -178,50 +202,195 @@ Conversation ──► Pre-flight ──► knowledgebase/*.yaml (legacy)
 - **For Central KB:** `kb` CLI installed (`kb` skill) + server reachable — embeddings handled by embed-server
 - Scripts at `/project/tooling/scripts/{load-kb-to-memory,search-kb-memory}.py` (only needed for vector DB)
 - Migration script at `/project/scripts/migrate-to-okf.py` (for legacy YAML → OKF conversion)
+- Migration script at `/project/scripts/migrate-okf-v01-to-v02.py` (for OKF v0.1 → v0.2 migration, optional — manual migration guidance provided in Phase 1)
 - (Pi only) `pi-hermes-memory` extension installed — manages all memory file writing
 
 ## Phase 1 — Distill (always runs)
 
-### OKF Format Reference
+### OKF v0.2 Format Reference
 
-Each knowledgebase entry is an **OKF v0.1 markdown file** with YAML frontmatter:
+Each knowledgebase entry is an **OKF v0.2 markdown file** with YAML frontmatter. v0.2 adds provenance, trust, lifecycle, and attestation as first-class frontmatter families while keeping the format minimally opinionated.
+
+#### Minimal example
 
 ```markdown
 ---
 type: Decision
-title: Adopt OKF v0.1 for Central Knowledge Base
-description: Migrated Central KB from proprietary YAML format to OKF v0.1
+title: Adopt OKF v0.2 for Central Knowledge Base
+description: Migrated Central KB from OKF v0.1 to v0.2
 tags: [okf, central-kb, knowledge-management]
-timestamp: 2026-06-21T00:00:00Z
+status: stable
+generated: { by: reference_agent/gemini-2.5-pro, at: 2026-06-21T00:00:00Z }
+verified: { by: human:ahormati, at: 2026-06-25T09:00:00Z }
+sources:
+  - id: okf-spec
+    resource: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
+    title: OKF v0.2 Specification
+    author: team:knowledge-catalog
+    last_modified: 2026-06-20
 ---
 
 # Context
-We needed a standardized format for knowledge entries.
+We needed a standardized format for knowledge entries with provenance and trust.
 
 # Decision
-Adopt OKF v0.1 with backward compatibility.
+Adopt OKF v0.2 with full provenance, trust, and lifecycle metadata.
 
 # Consequences
-All new entries use OKF markdown format.
+All new entries use OKF v0.2 markdown format with `generated`, `verified`, `status`, and `sources` where applicable.
 ```
 
-**Required frontmatter fields:**
+#### Required frontmatter fields
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Entry type: `Decision`, `Pattern`, `Session`, `Concept`, `Reference`, etc. |
-| `title` | string | Human-readable title |
+| `type` | string | Entry type: `Decision`, `Pattern`, `Session`, `Concept`, `Reference`, `Attested Computation`, etc. |
 
-**Recommended frontmatter fields:**
+`type` is the only always-required key. A concept carrying just `type` is fully conformant.
+
+#### Recommended frontmatter fields
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `description` | string | One-line summary |
-| `tags` | list | Categorization tags |
-| `timestamp` | string | ISO 8601 datetime (`2026-06-21T00:00:00Z`) |
-| `resource` | string | URL or path to source |
+| `title` | string | Human-readable display name. If omitted, consumers MAY derive a title from the filename. |
+| `description` | string | One-line summary. Used by `index.md` generators, search snippets, and previews. |
+| `tags` | list | YAML list of short strings for cross-cutting categorization. |
+| `resource` | string | Canonical URI for the underlying asset the concept describes. Absent for abstract ideas. |
 
-**Body:** Markdown content after the closing `---`. Use `# Section` headers for structure.
+#### Provenance family (`sources`)
 
-**Type-to-namespace mapping:**
+Records the materials a concept derives from. Each source entry carries optional credibility signals so consumers can infer trust.
+
+```yaml
+sources:
+  - id: ga4-schema
+    resource: https://developers.google.com/analytics/bigquery/export-schema
+    title: GA4 BigQuery Export schema
+    author: team:ga4-docs
+    usage_count: 5000
+    last_modified: 2026-05-30
+usage_window: { from: 2026-06-01, to: 2026-06-30 }
+```
+
+| Sub-field | Required | Description |
+|-----------|----------|-------------|
+| `resource` | Yes (per entry) | URL, bundle-relative path, or scope descriptor |
+| `id` | No | Stable key for per-claim attribution via footnotes |
+| `title` | No | Human-readable label |
+| `author` | No | Who/what produced the source (actor convention) |
+| `usage_count` | No | How often the resource was exercised over `usage_window` |
+| `last_modified` | No | When the source itself last changed (`YYYY-MM-DD`) |
+
+**Per-claim attribution:** Use markdown footnotes keyed to `sources[].id`:
+
+```markdown
+The `events_` table is sharded daily as `events_YYYYMMDD`.[^ga4-schema]
+
+[^ga4-schema]: GA4 BigQuery Export schema
+```
+
+#### Trust family (`generated`, `verified`)
+
+`generated` records how the current content was produced. `verified` records who or what has confirmed the content against its sources.
+
+```yaml
+generated: { by: reference_agent/gemini-2.5-pro, at: 2026-06-20T22:53:05Z }
+verified:
+  - { by: human:ahormati, at: 2026-06-25T09:00:00Z }
+  - { by: process:finance-nightly, at: 2026-06-26T02:00:00Z }
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `generated.by` | Yes (within `generated`) | Actor who produced the content |
+| `generated.at` | No | ISO 8601 datetime of last meaningful change |
+| `verified` | No | List of `{ by, at }` verification events. A single verifier MAY be a bare mapping (consumers treat it as a one-element list). |
+
+**Trust tiers** (derived from `verified`, lowest to highest):
+- No `verified` key ⇒ **unverified**
+- `verified` by non-`human:` actors only ⇒ **machine-confirmed**
+- `verified` by a `human:` actor ⇒ **human-reviewed**
+
+#### Lifecycle family (`status`, `stale_after`)
+
+```yaml
+status: stable        # draft | stable | deprecated
+stale_after: 2026-09-23   # absolute date; content is stale on/after this day
+```
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `status` | `draft`, `stable` (default), `deprecated` | Lifecycle stage |
+| `stale_after` | `YYYY-MM-DD` | Absolute date after which content is stale |
+
+Absent `status` ⇒ `stable`.
+
+#### Actor convention
+
+Fields that record identity (`generated.by`, `verified[].by`) use:
+
+| Prefix | Example | Meaning |
+|--------|---------|---------|
+| `agent/` | `reference_agent/gemini-2.5-pro` | Agent or tool |
+| `human:` | `human:ahormati` | Person |
+| `process:` | `process:finance-nightly` | Automated process |
+
+Consumers that classify trust key off the `human:` prefix, so producers MUST use it for hand-authored or human-confirmed content.
+
+#### Attested Computation type
+
+A concept of `type: Attested Computation` carries a sanctioned way to compute a value, so a consumer can confirm the agent ran the blessed computation instead of improvising.
+
+```yaml
+---
+type: Attested Computation
+title: Revenue for fiscal year
+description: Recognized revenue for a fiscal year, per Finance's definition.
+status: stable
+runtime: bigquery
+parameters:
+  - { name: year, type: integer, required: true }
+executor:
+  resource: references/skills/run-on-bq.md
+  receipt: [job_id, executed_sql, result]
+attester:
+  resource: references/attesters/sql-equality.py
+generated: { by: reference_agent/gemini-2.5-pro, at: 2026-06-20T22:53:05Z }
+verified: { by: human:ahormati, at: 2026-06-25T09:00:00Z }
+stale_after: 2026-09-23
+sources:
+  - id: rev-policy
+    resource: https://wiki.acme/finance/revenue-recognition
+    title: Revenue recognition policy
+---
+
+# Computation
+
+    SELECT SUM(amount) AS revenue
+    FROM finance.recognized_revenue
+    WHERE fiscal_year = @year
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `runtime` | Yes (for this type) | How to run: `bigquery`, `postgres`, `dbt`, `python`, `Looker`, etc. |
+| `parameters` | No | List of `{ name, type, required }` holes the agent may fill |
+| `computation` | No | Path to a file holding the computation (instead of inline body fence) |
+| `executor` | No | How the computation is run. `resource` names run instructions; `receipt` declares return fields. |
+| `attester` | No | Deterministic (no-LLM) code that inspects a receipt and returns a verdict. |
+
+#### Body
+
+Standard markdown after the closing `---`. Conventional headings:
+
+| Heading | Purpose |
+|-----------------|--------------------------------------------------------|
+| `# Schema` | Structured description of an asset's columns/fields |
+| `# Examples` | Concrete usage examples, often as fenced code blocks |
+| `# Computation` | The sanctioned computation of an Attested Computation |
+
+#### Type-to-namespace mapping
+
 | OKF Type | Directory |
 |----------|-----------|
 | `Decision` | `decisions/` |
@@ -229,7 +398,18 @@ All new entries use OKF markdown format.
 | `Session` | `sessions/` |
 | `Concept` | `concepts/` |
 | `Reference` | `references/` |
+| `Attested Computation` | `computations/` |
 | *(unknown)* | lowercased type |
+
+#### v0.1 → v0.2 migration notes
+
+When encountering existing v0.1 entries:
+
+1. **`timestamp` → `generated`**: Replace `timestamp: 2026-06-21T00:00:00Z` with `generated: { by: <actor>, at: 2026-06-21T00:00:00Z }`. If the original author is unknown, use `process:migration` as the actor.
+2. **Body `# Citations` → `sources`**: Move citation URLs into `sources` frontmatter entries. The body `# Citations` section can remain for backward compatibility but is superseded.
+3. **Add `status: stable`** to entries that are complete and reviewed.
+4. **Add `verified`** where human review has occurred.
+5. **Add `stale_after`** for time-sensitive knowledge (decisions, metrics).
 
 ### On Pi
 
@@ -241,8 +421,8 @@ Run the session-distillation workflow for **knowledgebase files only** (skip mem
    - `knowledgebase/decisions/*.md` — architecture decisions with rationale and alternatives
    - `knowledgebase/patterns/*.md` — implementation patterns, troubleshooting procedures
    - `knowledgebase/sessions/*.md` — session summaries (what was done, what changed)
-4. **Update index file** — `knowledgebase/index.md` (OKF bundle index with `okf_version: "0.1"`)
-5. **Verify** — no duplicates, no stale entries, index counts accurate
+4. **Update index file** — `knowledgebase/index.md` (OKF bundle index with `okf_version: "0.2"`). The bundle-root `index.md` MAY carry `okf_version: "0.2"` in its frontmatter (the only place frontmatter is permitted in an `index.md`).
+5. **Verify** — no duplicates, no stale entries, index counts accurate, all entries conform to OKF v0.2 frontmatter conventions
 
 **Do NOT write memory files.** Pi's `pi-hermes-memory` extension handles `MEMORY.md`, `USER.md`, and failure tracking automatically. Writing memory here creates duplicate/conflicting entries.
 
@@ -265,9 +445,19 @@ Run the full session-distillation workflow including both memory and knowledgeba
 5. **Update index files** — `MEMORY.md` and `knowledgebase/index.md`
 6. **Verify** — no duplicates, no stale entries, index counts accurate
 
-## Phase 2 — Index
+## Phase 2 — Index (DISABLED by default)
 
-All detected indexers run. Vector DB (local) and Central KB (shared) are independent — each serves different search needs.
+> **Gated behind `DISTILL_INDEX_ENABLED=1`.** Indexing is being redesigned and is OFF by default. Set `DISTILL_INDEX_ENABLED=1` to run it. Until the redesign lands, treat the vector DB / Central KB pipeline below as reference only.
+
+```bash
+# Opt in explicitly to run indexing (default: OFF)
+if [ "${DISTILL_INDEX_ENABLED:-0}" != "1" ]; then
+  echo "Indexing disabled (DISTILL_INDEX_ENABLED != 1). Skipping Phase 2."
+  exit 0
+fi
+```
+
+When enabled, all detected indexers run. Vector DB (local) and Central KB (shared) are independent — each serves different search needs.
 
 ### Vector DB (local)
 
@@ -341,7 +531,7 @@ See the `search-kb` skill for full details, pre-flight detection, and agent patt
 | Structured explain | `kb explain "<query>" --scope <project>` |
 | Pull new entries from other projects | `kb pull --project <project>` |
 | Check for concept drift | `kb drift --project <project>` |
-| Validate OKF bundle | `python3 -c "import sys; sys.path.insert(0,'/project/tooling/central-kb'); from app.okf import validate_okf_bundle; errors=validate_okf_bundle('/project/knowledgebase'); print(errors or '✅ OKF conformant')"` |
+| Validate OKF v0.2 bundle | `python3 -c "import sys; sys.path.insert(0,'/project/tooling/central-kb'); from app.okf import validate_okf_bundle; errors=validate_okf_bundle('/project/knowledgebase'); print(errors or '✅ OKF v0.2 conformant')"` |
 
 ## How Agents Use This
 
@@ -353,16 +543,19 @@ Agents treat the distill-and-index pipeline as a two-way memory system:
 ```
 Agent completes work
   → distill-and-index runs (manual or PreCompact hook)
-    → Pre-flight: detect legacy YAML, auto-convert to OKF
-    → Phase 1: session-distillation scans conversation, writes OKF .md files only
+    → Pre-flight: detect legacy YAML, auto-convert to OKF v0.1
+                  detect OKF v0.1 (timestamp field), migrate to v0.2
+    → Phase 1: session-distillation scans conversation, writes OKF v0.2 .md files only
+               with generated, verified, status, sources, stale_after as applicable
                (memory is skipped — pi-hermes-memory handles that independently)
-    → Phase 2a: load-kb-to-memory.py indexes entries into local vector DB
-    → Phase 2b: kb submit pushes entries to Central KB (cross-project sharing)
-      → Local knowledge searchable via /search-kb or search-kb-memory.py
-      → Shared knowledge searchable via kb search/explain
+    → Phase 2 (INDEXING, DISABLED by default): only if DISTILL_INDEX_ENABLED=1
+      → 2a: load-kb-to-memory.py indexes entries into local vector DB
+      → 2b: kb submit pushes entries to Central KB (cross-project sharing)
 ```
 
-**On Claude Code:** Same flow, but Phase 1 also writes memory files. Central KB push still runs in Phase 2b.
+> **Note:** Phase 2 is OFF by default pending redesign. Until `DISTILL_INDEX_ENABLED=1` is set, only Phase 1 (distill) runs.
+
+**On Claude Code:** Same flow, but Phase 1 also writes memory files. Central KB push still runs in Phase 2b (only when `DISTILL_INDEX_ENABLED=1`).
 
 ### Reading (Phase 3)
 
@@ -399,10 +592,11 @@ Agent starts new task
 4. Trace dependency chains, look for patterns
 
 **When a session ends (PreCompact hook):**
-1. Distill findings into knowledgebase (skip memory on Pi)
-2. Index local: `load-kb-to-memory.py` (if embedding source available)
-3. Index shared: `kb submit --project $CENTRAL_KB_PROJECT` (if Central KB available)
-4. Next session picks up from where this one left off
+1. Pre-flight: detect legacy YAML → convert to OKF v0.1, then migrate v0.1→v0.2
+2. Distill findings into knowledgebase (skip memory on Pi) using OKF v0.2 format with `generated`, `verified`, `status`, `sources`, `stale_after`
+3. Index local: `load-kb-to-memory.py` (if embedding source available)
+4. Index shared: `kb submit --project $CENTRAL_KB_PROJECT` (if Central KB available)
+5. Next session picks up from where this one left off
 
 ## Auto-Run via Hook
 
@@ -417,8 +611,8 @@ For automatic distillation before context compaction, add to `.pi/settings.local
       "matcher": "auto",
       "hooks": [{
         "type": "agent",
-        "prompt": "Run the distill-and-index skill. Pre-flight: detect legacy YAML files in knowledgebase/ and convert to OKF via python3 /project/scripts/migrate-to-okf.py. Phase 1: distill conversation into OKF markdown files using session-distillation (skip memory — hermes-memory handles that). Phase 2: run python3 /project/tooling/scripts/load-kb-to-memory.py to index KB files into the vector database, then kb submit --project $CENTRAL_KB_PROJECT to push entries to Central KB (if kb CLI available). Verify entry counts and kb submit results.",
-        "statusMessage": "Distilling session, converting legacy YAML, indexing into vector DB, and syncing to Central KB..."
+        "prompt": "Run the distill-and-index skill. Pre-flight: detect legacy YAML files in knowledgebase/ and convert to OKF via python3 /project/scripts/migrate-to-okf.py; then detect OKF v0.1 files (using 'timestamp' field) and migrate to v0.2 via python3 /project/scripts/migrate-okf-v01-to-v02.py. Phase 1: distill conversation into OKF v0.2 markdown files using session-distillation (skip memory — hermes-memory handles that). Include generated, verified, status, sources, and stale_after frontmatter where applicable. Phase 2 (INDEXING) is DISABLED by default — do NOT run load-kb-to-memory.py or kb submit unless DISTILL_INDEX_ENABLED=1 is explicitly set; indexing is being redesigned.",
+        "statusMessage": "Distilling session, converting legacy YAML, migrating v0.1→v0.2, indexing into vector DB, and syncing to Central KB..."
       }]
     }]
   }
@@ -434,8 +628,8 @@ For automatic distillation before context compaction, add to `.pi/settings.local
       "matcher": "auto",
       "hooks": [{
         "type": "agent",
-        "prompt": "Run the distill-and-index skill. Pre-flight: detect legacy YAML files in knowledgebase/ and convert to OKF via python3 /project/scripts/migrate-to-okf.py. Phase 1: distill conversation into memory/KB files using session-distillation. Phase 2: run python3 /project/tooling/scripts/load-kb-to-memory.py to index KB files into the vector database, then kb submit --project $CENTRAL_KB_PROJECT to push entries to Central KB (if kb CLI available). Verify entry counts and kb submit results.",
-        "statusMessage": "Distilling session, converting legacy YAML, indexing into vector DB, and syncing to Central KB..."
+        "prompt": "Run the distill-and-index skill. Pre-flight: detect legacy YAML files in knowledgebase/ and convert to OKF via python3 /project/scripts/migrate-to-okf.py; then detect OKF v0.1 files (using 'timestamp' field) and migrate to v0.2 via python3 /project/scripts/migrate-okf-v01-to-v02.py. Phase 1: distill conversation into memory/KB files using session-distillation. Use OKF v0.2 format with generated, verified, status, sources, and stale_after frontmatter where applicable. Phase 2 (INDEXING) is DISABLED by default — do NOT run load-kb-to-memory.py or kb submit unless DISTILL_INDEX_ENABLED=1 is explicitly set; indexing is being redesigned.",
+        "statusMessage": "Distilling session, converting legacy YAML, migrating v0.1→v0.2, indexing into vector DB, and syncing to Central KB..."
       }]
     }]
   }
@@ -447,13 +641,15 @@ For automatic distillation before context compaction, add to `.pi/settings.local
 After running, confirm:
 
 **All modes (Pi):**
-1. **KB entries created** — `cat knowledgebase/index.md`
+1. **KB entries created** — `cat knowledgebase/index.md` (should declare `okf_version: "0.2"`)
 2. **Memory untouched** — hermes-memory manages memory files independently
+3. **Indexing skipped by default** — confirm Phase 2 did not run unless `DISTILL_INDEX_ENABLED=1`
 
 **All modes (Claude Code):**
 1. **Memory files written** — `ls ~/.claude/projects/*/memory/`
 2. **MEMORY.md updated** — `cat ~/.claude/projects/*/memory/MEMORY.md`
-3. **KB entries created** — `cat knowledgebase/index.md`
+3. **KB entries created** — `cat knowledgebase/index.md` (should declare `okf_version: "0.2"`)
+4. **OKF v0.2 conformant** — `python3 -c "import sys; sys.path.insert(0,'/project/tooling/central-kb'); from app.okf import validate_okf_bundle; errors=validate_okf_bundle('/project/knowledgebase'); print(errors or '✅ OKF v0.2 conformant')"`
 
 **Vector DB (if available):**
 1. **Vector index populated** — `python3 -c "import sqlite3; db=sqlite3.connect('/project/.agent/agentdb.sqlite3'); print(db.execute('SELECT COUNT(*) FROM embeddings').fetchone()[0], 'entries')"`

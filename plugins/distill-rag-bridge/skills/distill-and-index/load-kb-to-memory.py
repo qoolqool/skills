@@ -172,8 +172,10 @@ def store_all():
                         "file": fpath.name,
                         "source": str(fpath.relative_to(KB.parent)),
                     }
-                    # Copy optional metadata fields
-                    for meta_key in ("timestamp", "resource", "status", "date", "category"):
+                    # Copy optional metadata fields (OKF v0.1 legacy + v0.2 new)
+                    for meta_key in ("timestamp", "resource", "status", "date", "category",
+                                     "stale_after", "generated", "verified", "sources",
+                                     "runtime", "parameters", "executor", "attester"):
                         if meta_key in fm:
                             metadata[meta_key] = fm[meta_key]
 
