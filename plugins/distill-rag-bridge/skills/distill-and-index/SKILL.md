@@ -16,8 +16,8 @@ This skill detects which indexing systems are available and uses **all that are 
 
 | Mode | Scope | Detection | Index Method | Search Method |
 |------|-------|-----------|-------------|----------------|
-| **Vector DB** | Local | embed-server or Ollama available + `bge-large` model | `load-kb-to-memory.py` (cosine similarity over embeddings) | `search-kb` skill |
-| **Central KB** | Shared | `kb` CLI on PATH + `kb health` succeeds | `kb submit` (1024-dim embeddings, auto-detected server URL) | `search-kb` skill |
+| **Vector DB** | Local | embed-server or Ollama available + `bge-small` model | `load-kb-to-memory.py` (cosine similarity over embeddings) | `search-kb` skill |
+| **Central KB** | Shared | `kb` CLI on PATH + `kb health` succeeds | `kb submit` (384-dim embeddings, auto-detected server URL) | `search-kb` skill |
 
 **Local vs Shared:** Vector DB is a **local** index — knowledge stays in this project. Central KB is a **shared** index — knowledge is pushed to a server where other projects and sessions can discover it. Both can run in parallel.
 
@@ -25,18 +25,18 @@ This skill detects which indexing systems are available and uses **all that are 
 
 ## Embedding Strategy
 
-All indexing requires 1024-dim embeddings. The embedding source is detected in priority order:
+All indexing requires 384-dim embeddings. The embedding source is detected in priority order:
 
 | Priority | Source | Speed | How |
 |-----------|--------|-------|-----|
 | 1 | **embed-server** (Central KB sidecar, HTTP) | ~100ms | HTTP at `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
-| 2 | **Ollama** (fallback) | ~330ms | HTTP at `localhost:11434/api/embeddings`, model `bge-large:latest` |
+| 2 | **Ollama** (fallback) | ~330ms | HTTP at `localhost:11434/api/embeddings`, model `bge-small:latest` |
 
-**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, which loads the embedding model (`BAAI/bge-large-en-v1.5`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via HTTP at `host.containers.internal:9001`.
+**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, which loads the embedding model (`BAAI/bge-small-en-v1.5`, 384-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via HTTP at `host.containers.internal:9001`.
 
 - `load-kb-to-memory.py` and `search-kb-memory.py` use `kb_common.py` which tries embed-server HTTP (port 9001) → Ollama fallback
 - `kb submit` uses client-side embeddings from the same pipeline
-- **Never mix embedding dimensions** — all entries must be 1024-dim
+- **Never mix embedding dimensions** — all entries must be 384-dim
 
 ## Platform Behavior
 
@@ -125,7 +125,7 @@ elif curl -sf http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
-sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
+sys.exit(0 if any('bge-small' in m for m in models) else 1)" 2>/dev/null; then
   HAS_EMBED=true
   INDEX_MODES+=("vectordb")
   echo "Embedding: Ollama (~330ms)"
@@ -178,7 +178,7 @@ Conversation ──► Pre-flight ──► knowledgebase/*.yaml (legacy)
                      │                │           │
                      │                ▼           ▼
                      │        load-kb-to-    kb submit
-                     │        memory.py     (1024-dim)
+                     │        memory.py     (384-dim)
                      │             │           │
                      │             ▼           ▼
                      │       agentdb.       Central KB
@@ -467,7 +467,7 @@ If an embedding source is available (embed-server HTTP sidecar or Ollama), build
 python3 /project/tooling/scripts/load-kb-to-memory.py
 ```
 
-This reads all `knowledgebase/{decisions,patterns,sessions}/*.md` and `*.yaml` files, generates 1024-dim embeddings (embed-server HTTP sidecar preferred, Ollama fallback), and stores them in `/project/.agent/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
+This reads all `knowledgebase/{decisions,patterns,sessions}/*.md` and `*.yaml` files, generates 384-dim embeddings (embed-server HTTP sidecar preferred, Ollama fallback), and stores them in `/project/.agent/agentdb.sqlite3`. Uses `INSERT OR REPLACE` — safe to run repeatedly.
 
 **In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, serving embeddings via HTTP at `host.containers.internal:9001`. **No Ollama model download needed**.
 
@@ -491,7 +491,7 @@ kb submit --project $CENTRAL_KB_PROJECT
 ```
 
 The `kb` CLI:
-- Auto-generates 1024-dim embeddings via embed-server (this project) or Ollama fallback
+- Auto-generates 384-dim embeddings via embed-server (this project) or Ollama fallback
 - Pre-computes simhash to avoid server-side OverflowError (unsigned int64 → signed int64 conversion)
 - Submits in batches of 5
 - Reports accepted/duplicate/conflicted/error for each entry

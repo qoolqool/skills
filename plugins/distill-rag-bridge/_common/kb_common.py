@@ -6,9 +6,9 @@ plus vector packing/unpacking and cosine similarity.
 
 Used by: load-kb-to-memory.py, search-kb-memory.py
 
-Embedding fallback chain (all use bge-large, 1024-dim):
+Embedding fallback chain (all use bge-small, 384-dim):
   1. Central KB embed-server HTTP sidecar (~100ms)
-  2. Ollama bge-large:latest (~330ms, auto-pulls if needed)
+  2. Ollama bge-small:latest (~330ms, auto-pulls if needed)
 """
 import hashlib
 import json
@@ -21,7 +21,7 @@ from pathlib import Path
 
 DB_PATH = Path("/project/.agent/agentdb.sqlite3")
 EMBED_CACHE_DB = Path("/project/.agent/embed_cache.sqlite3")
-EMBED_MODEL = "bge-large:latest"  # Must match BAAI/bge-large-en-v1.5 (1024-dim)
+EMBED_MODEL = "bge-small:latest"  # Must match BAAI/bge-small-en-v1.5 (384-dim)
 
 # Auto-create .agent/ directory on import so first-run never fails
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,7 @@ def embed_ollama(text: str) -> list[float] | None:
         resp = urllib.request.urlopen(req, timeout=120)
         result = json.loads(resp.read())
         vec = result.get("embedding")
-        if vec and len(vec) == 1024:
+        if vec and len(vec) == 384:
             return vec
         return None
     except Exception:
@@ -93,9 +93,9 @@ def embed_ollama(text: str) -> list[float] | None:
 
 
 def embed(text: str) -> list[float]:
-    """Generate 1024-dim embedding — tries HTTP sidecar, then Ollama.
+    """Generate 384-dim embedding — tries HTTP sidecar, then Ollama.
 
-    Both sources use BAAI/bge-large-en-v1.5 (1024-dim) so vectors are
+    Both sources use BAAI/bge-small-en-v1.5 (384-dim) so vectors are
     compatible across local and central KB indexes.
     """
     emb = embed_http(text)
@@ -107,7 +107,7 @@ def embed(text: str) -> list[float]:
     print("ERROR: No embedding source available.", file=sys.stderr)
     print("  Tried: 1) embed-server HTTP (host.containers.internal:9001)", file=sys.stderr)
     print(f"         2) Ollama (localhost:11434, model={EMBED_MODEL})", file=sys.stderr)
-    print("  Fix: start central-kb embed-server OR pull: ollama pull bge-large:latest", file=sys.stderr)
+    print("  Fix: start central-kb embed-server OR pull: ollama pull bge-small:latest", file=sys.stderr)
     sys.exit(1)
 
 
