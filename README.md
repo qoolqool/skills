@@ -6,7 +6,7 @@ Persist coding agent conversation insights across sessions. Distills decisions, 
 
 | Mode | Scope | Index Method | Search Method | Dependencies |
 |------|-------|-------------|---------------|-------------|
-| **Vector DB** | Local | `load-kb-to-memory.py` (cosine similarity over 1024-dim embeddings) | `search-kb-memory.py` or `search-kb` skill | embed-server or Ollama + `bge-large:latest` |
+| **Vector DB** | Local | `load-kb-to-memory.py` (cosine similarity over 384-dim embeddings) | `search-kb-memory.py` or `search-kb` skill | embed-server or Ollama + `bge-small:latest` |
 | **Central KB** | Shared (cross-project) | `kb submit` (pushes entries to shared server) | `kb search`, `kb explain` | `kb` CLI + Central KB server running |
 
 Both tiers can run simultaneously — Vector DB for fast local search, Central KB for cross-project knowledge sharing.
@@ -25,7 +25,7 @@ Both tiers can run simultaneously — Vector DB for fast local search, Central K
 | Requirement | How | Check |
 |-------------|-----|-------|
 | embed-server or Ollama | embed-server socket/HTTP (~40-100ms) or Ollama (~330ms) | see pre-flight |
-| bge-large model | Auto-detected; pulled by `entrypoint-wrapper.sh` if Ollama is source | `ollama list \| grep bge-large` |
+| bge-small model | Auto-detected; pulled by `entrypoint-wrapper.sh` if Ollama is source | `ollama list \| grep bge-small` |
 | Python 3.11+ | Pre-installed | `python3 --version` |
 | Scripts | `/project/scripts/{load-kb-to-memory,search-kb-memory}.py` | `ls /project/scripts/` |
 
@@ -77,13 +77,13 @@ Conversation ──► distill-and-index ──► knowledgebase/*.yaml
                      │             ┌──────────────────────┐
                      │             │  embed-server socket?  │
                      │             │  embed-server HTTP?    │
-                     │             │  Ollama bge-large?     │
+                     │             │  Ollama bge-small?     │
                      │             └────┬──────────┬────────┘
                      │             vectordb    central-kb
                      │                 │            │
                      │                 ▼            ▼
                      │          load-kb-to-    kb submit
-                     │          memory.py     (1024-dim)
+                     │          memory.py     (384-dim)
                      │              │            │
                      │              ▼            ▼
                      │        agentdb.      Central KB

@@ -40,7 +40,7 @@ elif curl -sf http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 models = [m['name'] for m in d.get('models', [])]
-sys.exit(0 if any('bge-large' in m for m in models) else 1)" 2>/dev/null; then
+sys.exit(0 if any('bge-small' in m for m in models) else 1)" 2>/dev/null; then
   HAS_EMBED=true
   echo "⚠ Embeddings: Ollama (~330ms) - consider starting embed-server instead"
 fi
@@ -128,9 +128,9 @@ When client-side embeddings are needed (vector DB search), sources are tried in 
 | Priority | Source | Speed | How |
 |-----------|--------|-------|-----|
 | 1 | **embed-server** (Central KB sidecar, HTTP) | ~100ms | `host.containers.internal:9001`, `POST /embed {"text":"..."}` |
-| 2 | Ollama (fallback) | ~330ms | `localhost:11434/api/embeddings`, model `bge-large:latest` |
+| 2 | Ollama (fallback) | ~330ms | `localhost:11434/api/embeddings`, model `bge-small:latest` |
 
-**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, which loads the embedding model (`BAAI/bge-large-en-v1.5`, 1024-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via HTTP at `host.containers.internal:9001`.
+**In this project:** Docker Compose via `entrypoint-wrapper.sh` starts `embed-server.py` automatically, which loads the embedding model (`BAAI/bge-small-en-v1.5`, 384-dim) via Hugging Face `sentence-transformers`. **No Ollama model download needed** — embeddings are served via HTTP at `host.containers.internal:9001`.
 
 If no source is available, vector DB search is unavailable. Central KB search still works.
 
@@ -138,7 +138,7 @@ If no source is available, vector DB search is unavailable. Central KB search st
 
 When you pass `--context`, the search uses two mechanisms to re-rank results:
 
-1. **Embedding interpolation (primary):** The context is embedded into a 1024-dim vector.
+1. **Embedding interpolation (primary):** The context is embedded into a 384-dim vector.
    The final score is `0.7 * cos(query, doc) + 0.3 * cos(context, doc)`.
    This biases results toward the semantic domain of the context.
 
@@ -218,7 +218,7 @@ which kb || echo "kb not found - install from install-kb-cli skill"
 kb health || echo "Central KB server unreachable"
 ```
 
-**For vector DB:** In this project, Docker Compose via `entrypoint-wrapper.sh` starts embed-server automatically. It loads the embedding model (`BAAI/bge-large-en-v1.5`) via Hugging Face — **no Ollama model download needed**.
+**For vector DB:** In this project, Docker Compose via `entrypoint-wrapper.sh` starts embed-server automatically. It loads the embedding model (`BAAI/bge-small-en-v1.5`) via Hugging Face — **no Ollama model download needed**.
 
 If embed-server is not running:
 ```bash

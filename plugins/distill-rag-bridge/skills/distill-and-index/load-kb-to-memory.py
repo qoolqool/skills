@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Load knowledgebase OKF markdown and legacy YAML files into a persistent vector database.
-Uses bge-large (1024-dim) embeddings via HTTP sidecar or Ollama + SQLite for storage.
+Uses bge-small (384-dim) embeddings via HTTP sidecar or Ollama + SQLite for storage.
 Embedding source: Central KB HTTP sidecar (host.containers.internal:9001) or Ollama.
 
 Supports both OKF (.md with YAML frontmatter) and legacy (.yaml) formats.
@@ -131,6 +131,7 @@ def store_all():
         "decisions": "decisions",
         "patterns": "patterns",
         "sessions": "sessions",
+        "gotchas": "gotchas",
     }
 
     total = 0
