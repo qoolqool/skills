@@ -396,10 +396,33 @@ Standard markdown after the closing `---`. Conventional headings:
 | `Decision` | `decisions/` |
 | `Pattern` | `patterns/` |
 | `Session` | `sessions/` |
+| `Gotcha` | `gotchas/` |
 | `Concept` | `concepts/` |
 | `Reference` | `references/` |
 | `Attested Computation` | `computations/` |
 | *(unknown)* | lowercased type |
+
+#### Filename convention
+
+Name every entry file `<domain>-<topic>.md`:
+
+- **lowercase**, hyphen-separated, **2–4 words** total (a domain + 1–3 topic words)
+- **domain** = the primary group tag (e.g. `nomad`, `fabricx`, `besu`, `solana`, `python`, `docker`, `fastapi`, `sqlalchemy`, `tailscale`, `testing`)
+- **no** `GOTCHA-`/`PATTERN-`/`DECISION-` prefix, **no** dates, **no** version numbers
+- target **≤ 30 characters**
+
+Examples:
+
+| Good | Bad |
+|------|-----|
+| `fabricx-orderer-panic.md` | `fabric-x-orderer-assembler-prefetch-panic-upstream-bug.md` |
+| `nomad-config-wipe.md` | `nomad-config-provisioner-wipe-orderer-permission-denied.md` |
+| `fastapi-response-body.md` | `GOTCHA-basehttp-streaming-response.md` |
+| `besu-htlc-semantics.md` | `besu-htlc-contract-semantics.md` |
+
+When an entry spans multiple related issues, keep the filename to the core
+topic and use `tags` for the rest. When consolidating or renaming, update all
+cross-references (`index.md`, other entries) in the same change.
 
 #### v0.1 → v0.2 migration notes
 
@@ -417,10 +440,11 @@ Run the session-distillation workflow for **knowledgebase files only** (skip mem
 
 1. **Scan** the conversation for decisions, gotchas, architecture realities, user preferences, bug root causes, integration details, troubleshooting procedures, and operational risks
 2. **Check existing entries** — read `knowledgebase/index.md` before writing
-3. **Write knowledge base entries** — OKF markdown files for decisions, patterns, and sessions:
+3. **Write knowledge base entries** — OKF markdown files for decisions, patterns, sessions, and gotchas:
    - `knowledgebase/decisions/*.md` — architecture decisions with rationale and alternatives
    - `knowledgebase/patterns/*.md` — implementation patterns, troubleshooting procedures
    - `knowledgebase/sessions/*.md` — session summaries (what was done, what changed)
+   - `knowledgebase/gotchas/*.md` — pitfalls, bug root causes, and operational gotchas
 4. **Update index file** — `knowledgebase/index.md` (OKF bundle index with `okf_version: "0.2"`). The bundle-root `index.md` MAY carry `okf_version: "0.2"` in its frontmatter (the only place frontmatter is permitted in an `index.md`).
 5. **Verify** — no duplicates, no stale entries, index counts accurate, all entries conform to OKF v0.2 frontmatter conventions
 

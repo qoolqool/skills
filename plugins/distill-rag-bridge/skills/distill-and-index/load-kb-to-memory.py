@@ -131,6 +131,7 @@ def store_all():
         "decisions": "decisions",
         "patterns": "patterns",
         "sessions": "sessions",
+        "gotchas": "gotchas",
     }
 
     total = 0
